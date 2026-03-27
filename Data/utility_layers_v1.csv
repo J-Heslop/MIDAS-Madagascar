@@ -1,0 +1,11 @@
+name,mean_utility,localOnly,timeQ1,timeQ2,timeQ3,timeQ4,incomeQ1,incomeQ2,incomeQ3,incomeQ4,duration_min,duration_max,access_cost_param,prereq,nExpected_frac,hard_slot,utility_form,restrict_to
+unskilled1,10,0,0.5,0.5,0.5,0.5,1,1,1,1,4,Inf,,,0.40,0,1,ALL
+unskilled2,20,0,0.5,0.5,0.5,0.5,1,1,1,1,8,Inf,,unskilled1,0.15,0,1,ALL
+skilled,30,0,0.5,0.5,0.5,0.5,1,1,1,1,12,Inf,educationCost,school,0.05,0,1,ALL
+school,0,0,0.75,0.75,0.75,0.75,0,0,0,0,16,16,educationCost,,0.10,0,0,ALL
+rice_north,10,1,0,0.5,0.5,0,0,0,0,1,8,Inf,smallFarmCost,,0.10,0,1,Diana|Sava|Sofia|Analanjirofo|Alaotra-Mangoro
+rice_south,10,1,0,0.5,0.5,0,0,0,0,1,8,Inf,smallFarmCost,,0.10,0,1,Amoron'i mania|Haute matsiatra|Vatovavy Fitovinany|Atsimo-Atsinana|Ihorombe|Analamanga|Bongolava|Itasy|Vakinankaratra
+maize,15,1,0,0.5,0.5,0,0,0,0,1,8,Inf,smallFarmCost,,0.08,0,1,ALL
+cassava,8,1,0,0.5,0.5,0,0,0,0,1,8,Inf,smallFarmCost,,0.12,0,1,ALL
+vanilla,50,1,0,0.5,0.5,0,0,0,0,1,16,Inf,largeFarmCost,,0.03,0,1,Sava|Analanjirofo
+industrial_crop,25,1,0,0.5,0.5,0,0,0,0,1,12,Inf,largeFarmCost,,0.04,0,1,ALL

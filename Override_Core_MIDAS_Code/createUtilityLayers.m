@@ -70,7 +70,6 @@ utilityHistory = zeros(size(locations,1),size(utilityLayerFunctions,1),timeSteps
 
 %utilityBaseLayers has dimensions of (location, activity, time)
 
-
 localOnly = [0; ... %unskilled 1
     0; ... %unskilled 2
     0; ... %skilled
@@ -115,7 +114,7 @@ for indexK = 1:size(locations,1)
     for indexI = 1:modelParameters.cycleLength:size(utilityBaseLayers,3)
         %utilityBaseLayers(indexK,:,indexI) = mean_utility_by_layer;
         for indexJ = 1:size(mean_utility_by_layer,1)
-            if 3 < indexJ < 6
+            if 3 < indexJ && indexJ < 6 % this isolates the agg layers to apply random regional yield pertubations and time varying yield purtubations due to weather
                 utilityBaseLayers(indexK,indexJ,indexI:indexI + modelParameters.cycleLength -1) = mean_utility_by_layer(indexJ,1) * (1 + epsilon * (-1 + 2 * rand(1))) * (1 + climate_epsilon * (-1 + 2 * rand(1)));
             else
                 utilityBaseLayers(indexK,indexJ,indexI:indexI + modelParameters.cycleLength -1) = mean_utility_by_layer(indexJ,1);
@@ -123,6 +122,13 @@ for indexK = 1:size(locations,1)
         end
     end
 end
+
+% --- Spatial restrictions ---
+% Find which row indices in 'locations' correspond to Sava
+savaRows = strcmp(locations.NAME_2, 'Sava');  % logical index
+
+% Vanilla only viable in Sava — zero out everywhere else
+utilityBaseLayers(~savaRows, L.cash_crop_vanilla, :) = 0;
 
 for indexI = 1:size(utilityBaseLayers,1)
     for indexJ = 1:size(utilityBaseLayers,2)

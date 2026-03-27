@@ -71,8 +71,9 @@ modelParameters.popFile      = './Data/1985_MDG_GHSPop_totals_by_region.csv';
 modelParameters.survivalFile  = ['./Data/survival_'  modelParameters.sspScenario '.csv'];
 modelParameters.fertilityFile = ['./Data/fertility_' modelParameters.sspScenario '.csv'];
 
-modelParameters.agePreferencesFile = './Data/age_specific_params.xls';
-modelParameters.utilityDataPath = './Data';
+modelParameters.agePreferencesFile  = './Data/age_specific_params.xls';
+modelParameters.utilityDataPath     = './Data';
+modelParameters.utilityLayersFile   = './Data/utility_layers_v1.csv'; % swap filename to switch layer configurations
 modelParameters.saveImg = true;
 modelParameters.shortName = 'Mada_toy_application';
 agentParameters.currentID = 1;
