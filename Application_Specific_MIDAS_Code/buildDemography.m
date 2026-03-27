@@ -115,13 +115,57 @@ if(~isempty(modelParameters.survivalFile))
     else
         survivalTable = readtable(modelParameters.survivalFile);
     end
-    agePointsSurvival = (survivalTable.MaxAge)';
-    survivalRate = ones(height(locations),1) * (survivalTable.Male)';
-    survivalRate(:,:,2) = ones(height(locations),1) * (survivalTable.Female)';
-    survivalRate = 1 - survivalRate;
+
+    if ismember('Year', survivalTable.Properties.VariableNames)
+        % --- TIME-VARYING: pre-interpolate to one value per year between
+        %     startYear and endYear, producing a 4D array (loc x age x sex x time).
+        %     The CSV stores annual mortality probability (1 - 5yr_ratio^(1/5));
+        %     we convert to annual survival here, matching the static convention.
+        demogYears        = (modelParameters.startYear : modelParameters.endYear)';
+        dataYears         = sort(unique(survivalTable.Year));
+        agePointsSurvival = sort(unique(survivalTable.MaxAge))';
+        numT              = length(demogYears);
+        numLoc            = height(locations);
+        numAgeS           = length(agePointsSurvival);
+
+        % Build (dataYear x age) mortality matrices for each sex
+        maleMortMat   = zeros(length(dataYears), numAgeS);
+        femaleMortMat = zeros(length(dataYears), numAgeS);
+        for iY = 1:length(dataYears)
+            yearRows = survivalTable(survivalTable.Year == dataYears(iY), :);
+            for iA = 1:numAgeS
+                ageRow = yearRows(yearRows.MaxAge == agePointsSurvival(iA), :);
+                if ~isempty(ageRow)
+                    maleMortMat(iY, iA)   = ageRow.Male(1);
+                    femaleMortMat(iY, iA) = ageRow.Female(1);
+                end
+            end
+        end
+
+        % Interpolate each age bin to annual resolution then replicate across locations
+        survivalRate = zeros(numLoc, numAgeS, 2, numT);
+        for iA = 1:numAgeS
+            maleSurv   = 1 - interp1(dataYears, maleMortMat(:,iA),   demogYears, 'linear', 'extrap');
+            femaleSurv = 1 - interp1(dataYears, femaleMortMat(:,iA), demogYears, 'linear', 'extrap');
+            % Clamp to (0,1] - extrapolation can occasionally push outside range
+            maleSurv   = min(1, max(0.001, maleSurv));
+            femaleSurv = min(1, max(0.001, femaleSurv));
+            survivalRate(:, iA, 1, :) = repmat(reshape(maleSurv,   1,1,1,numT), numLoc,1,1,1);
+            survivalRate(:, iA, 2, :) = repmat(reshape(femaleSurv, 1,1,1,numT), numLoc,1,1,1);
+        end
+
+    else
+        % --- STATIC (original behaviour): reshape to add a size-1 time dimension
+        %     so that midasMainLoop.m can index uniformly with tIdx.
+        agePointsSurvival = (survivalTable.MaxAge)';
+        staticRate = ones(height(locations),1) * (survivalTable.Male)';
+        staticRate(:,:,2) = ones(height(locations),1) * (survivalTable.Female)';
+        survivalRate = reshape(1 - staticRate, height(locations), length(agePointsSurvival), 2, 1);
+    end
 else
     agePointsSurvival = agePointsPopulation;
-    survivalRate = 1 - rand(height(locations),size(agePointsSurvival,2),2) / 200;  %this gives annual likelihood of death up to 2% for all ages, places, and genders
+    staticRate = 1 - rand(height(locations), length(agePointsSurvival), 2) / 200;
+    survivalRate = reshape(staticRate, height(locations), length(agePointsSurvival), 2, 1);
 end
 
 if(~isempty(modelParameters.fertilityFile))
@@ -130,14 +174,52 @@ if(~isempty(modelParameters.fertilityFile))
     else
         fertilityTable = readtable(modelParameters.fertilityFile);
     end
-    agePointsFertility = (fertilityTable.MaxAge)';
-    agePointsFertility = [fertilityTable.MinAge(1) agePointsFertility];
-    fertilityRate = ones(height(locations),1) * (fertilityTable.Births)' / 1000; %this data is births per 1000 women
-    fertilityRate = [zeros(height(locations),1) fertilityRate];
+
+    if ismember('Year', fertilityTable.Properties.VariableNames)
+        % --- TIME-VARYING: pre-interpolate to annual values, producing a 3D
+        %     array (loc x age x time).  Age axis has a leading zero-fertility
+        %     point prepended (matching the static convention below).
+        %     CSV stores annual births per 1,000 women (already divided by 5).
+        demogYears   = (modelParameters.startYear : modelParameters.endYear)';
+        dataYears    = sort(unique(fertilityTable.Year));
+        ageMaxPts    = sort(unique(fertilityTable.MaxAge))';
+        agePointsFertility = [fertilityTable.MinAge(1) ageMaxPts]; % prepend lower bound
+        numT         = length(demogYears);
+        numLoc       = height(locations);
+        numAgeF      = length(ageMaxPts);
+
+        % Build (dataYear x age) matrix of annual birth rates (per woman)
+        birthMat = zeros(length(dataYears), numAgeF);
+        for iY = 1:length(dataYears)
+            yearRows = fertilityTable(fertilityTable.Year == dataYears(iY), :);
+            for iA = 1:numAgeF
+                ageRow = yearRows(yearRows.MaxAge == ageMaxPts(iA), :);
+                if ~isempty(ageRow)
+                    birthMat(iY, iA) = ageRow.Births(1) / 1000;
+                end
+            end
+        end
+
+        % Interpolate each age bin to annual resolution then replicate across locations
+        % First column is always zero (no fertility below minimum age)
+        fertilityRate = zeros(numLoc, numAgeF + 1, numT);
+        for iA = 1:numAgeF
+            birthsInterp = interp1(dataYears, birthMat(:,iA), demogYears, 'linear', 'extrap');
+            birthsInterp = max(0, birthsInterp); % clamp - no negative fertility
+            fertilityRate(:, iA + 1, :) = repmat(reshape(birthsInterp, 1,1,numT), numLoc,1,1);
+        end
+
+    else
+        % --- STATIC (original behaviour): reshape to add a size-1 time dimension
+        agePointsFertility = [fertilityTable.MinAge(1) (fertilityTable.MaxAge)'];
+        staticFert = [zeros(height(locations),1) ones(height(locations),1) * (fertilityTable.Births)' / 1000];
+        fertilityRate = reshape(staticFert, height(locations), length(agePointsFertility), 1);
+    end
 else
     agePointsFertility = [0 10 15 49 100];
-    fertilityRate = rand(height(locations),size(agePointsFertility,2)) / 10;  %this gives annual likelihood of birth up to 10%
-    fertilityRate(:,[1 2 4 5]) = 0; 
+    staticFert = rand(height(locations), length(agePointsFertility)) / 10;
+    staticFert(:,[1 2 4 5]) = 0;
+    fertilityRate = reshape(staticFert, height(locations), length(agePointsFertility), 1);
 end
 
 %any additional age-specific factors ought to be handled here

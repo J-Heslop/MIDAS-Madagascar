@@ -38,7 +38,15 @@ agentLocations = ones(1,length(agentList));
 agentLocations(aliveList) = [agentList(aliveList).matrixLocation];
 
 for indexT = 1:modelParameters.timeSteps
-    
+
+    % Compute current calendar year and demographic array index.
+    % During spinup (indexT <= spinupTime) the model uses startYear demographics.
+    % After spinup, currentYear advances at 1/cycleLength years per timestep.
+    currentYear = modelParameters.startYear + ...
+        max(0, indexT - modelParameters.spinupTime) / modelParameters.cycleLength;
+    tIdx = min( max(1, round(currentYear) - modelParameters.startYear + 1), ...
+                size(demographicVariables.survivalRate, 4) );
+
     %update the social network links ... cap any that swelled above 1 in
     %the last loop, and allow all to decay to no less than 0
     mapVariables.network(mapVariables.network ~= 0) = min(1,mapVariables.network(mapVariables.network ~= 0));
@@ -59,7 +67,7 @@ for indexT = 1:modelParameters.timeSteps
         currentAgent.age = currentAgent.age + modelParameters.cyclesPerTimeStep;
 
         %draw number to see if agent survives to this timestep
-        agentSurvives = rand() < interp1([demographicVariables.agePointsSurvival], [demographicVariables.survivalRate(currentAgent.matrixLocation,:,currentAgent.gender)], currentAgent.age);
+        agentSurvives = rand() < interp1([demographicVariables.agePointsSurvival], [demographicVariables.survivalRate(currentAgent.matrixLocation,:,currentAgent.gender,tIdx)], currentAgent.age);
 
         if(~agentSurvives)
 
@@ -92,7 +100,7 @@ for indexT = 1:modelParameters.timeSteps
  
         %draw number to see if (for female agents) agent gives birth
         if(currentAgent.gender == 2 && currentAgent.age >= modelParameters.ageDecision)
-            agentGivesBirth = rand() < interp1(demographicVariables.agePointsFertility, demographicVariables.fertilityRate(currentAgent.matrixLocation,:), currentAgent.age);
+            agentGivesBirth = rand() < interp1(demographicVariables.agePointsFertility, demographicVariables.fertilityRate(currentAgent.matrixLocation,:,tIdx), currentAgent.age);
             if(agentGivesBirth)
                 gender = 2 - (rand() > 0.5);  %let it be equally likely to be 1 or 2
                 age = 0;

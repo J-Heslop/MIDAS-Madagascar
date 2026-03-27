@@ -1,21 +1,26 @@
 function [agentParameters, modelParameters, networkParameters, mapParameters] = readParameters(inputs)
 
 %All model parameters go here
-modelParameters.spinupTime = 10;
-modelParameters.numAgents = 2000;
+modelParameters.spinupTime = 10; % in quarters, so 10 = 2.5 years
+modelParameters.numAgents = 2000; % Number of agents in the initial state of the model, changes through time based on demography
 mapParameters.sizeX = 600;
 mapParameters.sizeY = 600;
 mapParameters.levelID = '_PCODE';
 mapParameters.levelName = '_EN';
+
 modelParameters.cycleLength = 4;
-modelParameters.numCycles = 40;
+modelParameters.startYear = 1985;
+modelParameters.endYear = 2085;
+modelParameters.sspScenario = 'SSP2';
+modelParameters.numCycles = modelParameters.endYear - modelParameters.startYear; % number of years; timeSteps = spinupTime + numCycles * cycleLength
+
 modelParameters.incomeInterval = 1;
 modelParameters.visualizeYN = 0;
 modelParameters.listTimeStepYN = 1;
 modelParameters.visualizeInterval = 2;
 modelParameters.showMovesOrNetwork = 1; %1 for recent moves, 0 for network
-modelParameters.movesFadeSteps = 12; 
-modelParameters.edgeAlpha = 0.2; 
+modelParameters.movesFadeSteps = 12;
+modelParameters.edgeAlpha = 0.2;
 modelParameters.ageDecision = 15;
 modelParameters.ageLearn = 10;
 modelParameters.utility_k = 4; %Original value: 4
@@ -62,16 +67,9 @@ mapParameters.r1 = []; %this will be the spatial reference if we are pulling fro
 mapParameters.saveDirectory = './Outputs/';
 
 mapParameters.filePath = './Data/Mada Admin 2/Admin_2_lat_lon.shp';
-modelParameters.popFile = [];%'./Data/senegal_population_extract.xls';
-modelParameters.survivalFile = [];%'./Data/mortality_sen.xls';
-modelParameters.fertilityFile = [];%'./Data/fert_age_sen.xls';
-
-
-%mapParameters.filePath = []; %'./Data/Senegal Boundary Files Admin 2/Admin_2_lat_lon.shp';
-%modelParameters.popFile = []; %'./Data/senegal_population_extract.xls';
-%modelParameters.survivalFile = []; %'./Data/mortality_sen.xls';
-%modelParameters.fertilityFile = []; %'./Data/fert_age_sen.xls';
-
+modelParameters.popFile      = './Data/1985_MDG_GHSPop_totals_by_region.csv';
+modelParameters.survivalFile  = ['./Data/survival_'  modelParameters.sspScenario '.csv'];
+modelParameters.fertilityFile = ['./Data/fertility_' modelParameters.sspScenario '.csv'];
 
 modelParameters.agePreferencesFile = './Data/age_specific_params.xls';
 modelParameters.utilityDataPath = './Data';
@@ -129,16 +127,15 @@ agentParameters.uninformedMaxExpectedProbJoinLayerSD = 0;
 agentParameters.expectationDecayMean = 0.1;
 agentParameters.expectationDecaySD = 0;
 
-%override any input variables. 'inputs' should be a dataset with two columns,
-%one with the parameter name and one with the value
+% override any input variables. 'inputs' should be a dataset with two columns,
+% one with the parameter name and one with the value
 if(~isempty(inputs))
    for indexI = 1:size(inputs,1)
        eval([inputs.parameterNames{indexI} ' = ' num2str(inputs.parameterValues(indexI)) ';']);
    end
 end
 
-modelParameters.timeSteps = modelParameters.spinupTime + modelParameters.numCycles * modelParameters.cycleLength;  %in this particular experiment only, there are 204 time steps with data
+modelParameters.timeSteps = modelParameters.spinupTime + modelParameters.numCycles * modelParameters.cycleLength;
 
 
 end
-
