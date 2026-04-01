@@ -6,7 +6,7 @@ modelParameters.numAgents = 2000; % Number of agents in the initial state of the
 mapParameters.sizeX = 600;
 mapParameters.sizeY = 600;
 mapParameters.levelID = '_PCODE';
-mapParameters.levelName = '_EN';
+mapParameters.levelName = 'NAME_'; % captures NAME_1, NAME_2 from shapefile as source_NAME_1, source_NAME_2
 
 modelParameters.cycleLength = 4;
 modelParameters.startYear = 1985;
@@ -67,9 +67,12 @@ mapParameters.r1 = []; %this will be the spatial reference if we are pulling fro
 mapParameters.saveDirectory = './Outputs/';
 
 mapParameters.filePath = './Data/Mada Admin 2/Admin_2_lat_lon.shp';
-modelParameters.popFile      = './Data/1985_MDG_GHSPop_totals_by_region.csv';
-modelParameters.survivalFile  = ['./Data/survival_'  modelParameters.sspScenario '.csv'];
-modelParameters.fertilityFile = ['./Data/fertility_' modelParameters.sspScenario '.csv'];
+% Demographic files - set to [] to use random fallback while data files are being prepared.
+% Restore these lines once survival_SSP2.csv, fertility_SSP2.csv, and a
+% population file with male_X/female_X age columns are in the Data folder.
+modelParameters.popFile       = [];  % './Data/1985_MDG_GHSPop_totals_by_region.csv'
+modelParameters.survivalFile  = [];  % ['./Data/survival_'  modelParameters.sspScenario '.csv']
+modelParameters.fertilityFile = [];  % ['./Data/fertility_' modelParameters.sspScenario '.csv']
 
 modelParameters.agePreferencesFile  = './Data/age_specific_params.xls';
 modelParameters.utilityDataPath     = './Data';

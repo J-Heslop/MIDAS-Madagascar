@@ -45,12 +45,8 @@ function [locationLikelihood, genderLikelihood, ageLikelihood, survivalRate, fer
 %make locationLikelihood - if there is no data, let the likelihood be
 %uniform random
 if(~isempty(modelParameters.popFile))
-    if(ispc)
-        popTable = readtable(modelParameters.popFile,'UseExcel',false);
-    else
-        popTable = readtable(modelParameters.popFile);
-    end
-    popTable.population = sum(popTable{:,2:end},2);
+    popTable = readtable(modelParameters.popFile);
+    popTable.population = sum(popTable{:,end},2);
     popTable = join(popTable,locations,'LeftKeys',{'ADM2_PCODE'},'RightKeys',{'source_ADM2_PCODE'});
     
     %variable names with age bins are of form 'maleX_Y'

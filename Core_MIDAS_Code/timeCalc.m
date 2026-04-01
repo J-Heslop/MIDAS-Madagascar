@@ -9,14 +9,18 @@ timeUse = zeros(1,4);
 timeUse = sum(constraints(portfolio,2:end),1); 
 
 %Now check for any concurrent rural-urban activities
-
-for indexQ = 1:size(constraints(:,2:end),2)
-    tempRural = any(mod(portfolio,2)); %Rural layers are odd indices
-    tempUrban = any(~mod(portfolio,2)); %Urban layers are even indices
-    
-    if ~isempty(tempRural) && ~isempty(tempUrban)
-        timeUse(indexQ) = timeUse(indexQ) + modelParameters.ruralUrbanTime;
-    end
-end
+% NOTE: Madagascar model does not use the rural/urban layer distinction.
+% The original Senegal code used odd-indexed layers as "rural" and
+% even-indexed as "urban", but mod(portfolio,2) tests the VALUES (0 or 1),
+% not the INDICES, so the original logic was always true for any non-empty
+% portfolio. This block is retained but disabled for Madagascar.
+%
+% To re-enable for a model with a genuine rural/urban split, replace with:
+%   oddIdx  = mod(1:length(portfolio), 2) == 1;
+%   tempRural = any(portfolio & oddIdx);
+%   tempUrban = any(portfolio & ~oddIdx);
+%   if tempRural && tempUrban
+%       timeUse(indexQ) = timeUse(indexQ) + modelParameters.ruralUrbanTime;
+%   end
 
 end

@@ -90,14 +90,35 @@ end
 % Uses NAME_2 (district name) from the locations table.
 % Multiple regions are pipe-separated in the CSV, e.g. 'Sava|Analanjirofo'.
 % Spelling must match the shapefile NAME_2 field exactly.
+% Determine which location name field to use for spatial restrictions.
+% Prefer source_NAME_2 (requires regenerating the map .mat after levelName
+% was set to 'NAME_' in readParameters.m).  Fall back to source_ADM2_FR
+% (always present in the shapefile).  Restrict-to values in the CSV must
+% match the chosen field's values exactly.
+if ismember('source_NAME_2', locations.Properties.VariableNames)
+    locNameField = 'source_NAME_2';
+elseif ismember('source_ADM2_FR', locations.Properties.VariableNames)
+    locNameField = 'source_ADM2_FR';
+elseif ismember('source_ADM1_FR', locations.Properties.VariableNames)
+    locNameField = 'source_ADM1_FR';
+else
+    % Last resort — use whatever the first source_ field is
+    srcFields = locations.Properties.VariableNames( ...
+        startsWith(locations.Properties.VariableNames, 'source_'));
+    locNameField = srcFields{1};
+    warning('createUtilityLayers: could not find a region name field. Using %s for spatial restrictions.', locNameField);
+end
+
+locNameVec = string(locations.(locNameField));
+
 restrictTo = layerDefs.restrict_to;
 for iL = 1:nLayers
     if restrictTo(iL) ~= "ALL"
         regions = strsplit(restrictTo(iL), '|');
-        if iscell(locations.NAME_2)
-            allowedRows = ismember(locations.NAME_2, cellstr(regions));
-        else
-            allowedRows = ismember(string(locations.NAME_2), regions);
+        allowedRows = ismember(locNameVec, regions);
+        if ~any(allowedRows)
+            warning('createUtilityLayers: layer "%s" restrict_to="%s" matched 0 locations in field "%s". Layer will be unavailable everywhere. Check spelling.', ...
+                char(layerDefs.name(iL)), char(restrictTo(iL)), locNameField);
         end
         utilityBaseLayers(~allowedRows, iL, :) = 0;
     end
@@ -110,7 +131,7 @@ end
 % (e.g. 'smallFarmCost', 'largeFarmCost', 'educationCost').
 % Leave blank for layers with free entry.
 
-accessCostParams = layerDefs.access_cost_param;
+accessCostParams = fillmissing(layerDefs.access_cost_param,'constant',"");
 uniqueParams     = unique(accessCostParams(accessCostParams ~= ""));
 nCostTypes       = length(uniqueParams);
 
@@ -175,7 +196,7 @@ utilityTimeConstraints = [(1:nLayers)', timeQs];
 % Convention: utilityPrereqs(this_layer, required_layer) = 1
 
 utilityPrereqs = zeros(nLayers, nLayers);
-prereqCol      = layerDefs.prereq;
+prereqCol = fillmissing(layerDefs.prereq,'constant',"");
 for iL = 1:nLayers
     if prereqCol(iL) ~= ""
         prereqIdx = L.(char(prereqCol(iL)));
