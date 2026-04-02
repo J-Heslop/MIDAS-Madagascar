@@ -388,9 +388,9 @@ for indexT = 1:modelParameters.timeSteps
     if(modelParameters.listTimeStepYN) % indexT = 15
         % fprintf([runName ' - Time step ' num2str(indexT) ' of ' num2str(modelParameters.timeSteps) ' - ' num2str(migrations(indexT)) ' migrations across ' num2str(numLivingAgents) ' total agents.\n']);
         if indexT <= modelParameters.spinupTime 
-            fprintf([runName ' - ' modelParameters.sspScenario ': initialisation step ' num2str(indexT) ' of ' num2str(modelParameters.spinupTime) '.\n']);
+            fprintf([runName ' - ' modelParameters.sspScenario ': initialisation step' num2str(indexT) ' of ' num2str(modelParameters.spinupTime) '.\n']);
         else 
-            sim_timestep = indexT-modelParameters.spinupTime ;
+            sim_timestep = indexT-modelParameters.spinupTim ;
             year = num2str(modelParameters.startYear + floor(sim_timestep /modelParameters.cycleLength));
             quarter = num2str(mod(sim_timestep-1,modelParameters.cycleLength)+1);
             fprintf([runName ' - ' modelParameters.sspScenario ': ' year '-Q' quarter ' of ' num2str(modelParameters.endYear) ' - ' num2str(migrations(indexT)) ' migrations across ' num2str(numLivingAgents) ' total agents.\n']);

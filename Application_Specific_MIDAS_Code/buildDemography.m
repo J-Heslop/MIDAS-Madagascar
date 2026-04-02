@@ -49,53 +49,71 @@ if(~isempty(modelParameters.popFile))
     popTable.population = sum(popTable{:,end},2);
     popTable = join(popTable,locations,'LeftKeys',{'ADM2_PCODE'},'RightKeys',{'source_ADM2_PCODE'});
     
-    %variable names with age bins are of form 'maleX_Y'
-    agePointsPopulationMale = popTable.Properties.VariableNames(startsWith(popTable.Properties.VariableNames,'male'));
-    agePointsPopulationMale = regexprep(agePointsPopulationMale,'male','');
-    for indexI = 1:size(agePointsPopulationMale,2)
-        try agePointsPopulationMale{indexI} = extractAfter(agePointsPopulationMale{indexI},strfind(agePointsPopulationMale{indexI},'_'));
+    % Check whether the population file contains age-sex breakdown columns
+    % (expected format: male_X_Y and female_X_Y, e.g. male_0_4, female_15_19).
+    % If absent (e.g. only a total-population column is provided), we still
+    % use the file for spatial distribution but fall back to a uniform age
+    % distribution so the model does not crash.
+    hasMaleAgeCols   = any(startsWith(popTable.Properties.VariableNames, 'male'));
+    hasFemaleAgeCols = any(startsWith(popTable.Properties.VariableNames, 'female'));
+
+    if hasMaleAgeCols && hasFemaleAgeCols
+        %variable names with age bins are of form 'maleX_Y'
+        agePointsPopulationMale = popTable.Properties.VariableNames(startsWith(popTable.Properties.VariableNames,'male'));
+        agePointsPopulationMale = regexprep(agePointsPopulationMale,'male','');
+        for indexI = 1:size(agePointsPopulationMale,2)
+            try agePointsPopulationMale{indexI} = extractAfter(agePointsPopulationMale{indexI},strfind(agePointsPopulationMale{indexI},'_'));
+            end
         end
-    end
-    agePointsPopulationMale = str2double(agePointsPopulationMale);
-    [agePointsPopulationMale, ageIndexMale] = sort(agePointsPopulationMale,'ascend');
-    
-    agePointsPopulationFemale = popTable.Properties.VariableNames(startsWith(popTable.Properties.VariableNames,'female'));
-    agePointsPopulationFemale = regexprep(agePointsPopulationFemale,'female','');
-    for indexI = 1:size(agePointsPopulationFemale,2)
-        try agePointsPopulationFemale{indexI} = extractAfter(agePointsPopulationFemale{indexI},strfind(agePointsPopulationFemale{indexI},'_'));
+        agePointsPopulationMale = str2double(agePointsPopulationMale);
+        [agePointsPopulationMale, ageIndexMale] = sort(agePointsPopulationMale,'ascend');
+
+        agePointsPopulationFemale = popTable.Properties.VariableNames(startsWith(popTable.Properties.VariableNames,'female'));
+        agePointsPopulationFemale = regexprep(agePointsPopulationFemale,'female','');
+        for indexI = 1:size(agePointsPopulationFemale,2)
+            try agePointsPopulationFemale{indexI} = extractAfter(agePointsPopulationFemale{indexI},strfind(agePointsPopulationFemale{indexI},'_'));
+            end
         end
+        agePointsPopulationFemale = str2double(agePointsPopulationFemale);
+        [~, ageIndexFemale] = sort(agePointsPopulationFemale,'ascend');
+
+        ageLikelihoodMale = popTable{:,startsWith(popTable.Properties.VariableNames,'male')};
+        ageLikelihoodMale(popTable.matrixID,:) = ageLikelihoodMale;
+        ageLikelihoodMale = ageLikelihoodMale(:,ageIndexMale); %just in case the tables aren't ordered properly
+        popTable.male = sum(ageLikelihoodMale,2);
+        ageLikelihoodMale = cumsum(ageLikelihoodMale,2);
+        ageLikelihoodMale = ageLikelihoodMale ./ (ageLikelihoodMale(:,end) * ones(1,size(ageLikelihoodMale,2)));
+
+        ageLikelihoodFemale = popTable{popTable.matrixID,startsWith(popTable.Properties.VariableNames,'female')};
+        ageLikelihoodFemale(popTable.matrixID,:) = ageLikelihoodFemale;
+        ageLikelihoodFemale = ageLikelihoodFemale(:,ageIndexFemale); %just in case the tables aren't ordered properly
+        popTable.male = sum(ageLikelihoodFemale,2);
+        ageLikelihoodFemale = cumsum(ageLikelihoodFemale,2);
+        ageLikelihoodFemale = ageLikelihoodFemale ./ (ageLikelihoodFemale(:,end) * ones(1,size(ageLikelihoodFemale,2)));
+
+        ageLikelihood = ageLikelihoodMale;
+        ageLikelihood(:,:,2) = ageLikelihoodFemale;
+        agePointsPopulation = agePointsPopulationMale;
+
+        popTable.female = sum(popTable{:,startsWith(popTable.Properties.VariableNames,'female')},2);
+        popTable = popTable(:,{'population','male','female','matrixID'});
+
+        genderLikelihood = popTable.male ./ popTable.population;
+        genderLikelihood(popTable.matrixID) = genderLikelihood;
+    else
+        % No age-sex columns — use population totals for spatial distribution
+        % only, and fall back to uniform age distribution and 50/50 sex ratio.
+        warning('buildDemography: popFile has no male_*/female_* age columns. Using total population for spatial distribution only; age distribution will be uniform.');
+        agePointsPopulation = [0 50 100];
+        ageLikelihood = ones(height(locations),1) * [0 0.5 1];
+        ageLikelihood(:,:,2) = ageLikelihood;
+        genderLikelihood = 0.5 * ones(height(locations),1);
     end
-    agePointsPopulationFemale = str2double(agePointsPopulationFemale);
-    [~, ageIndexFemale] = sort(agePointsPopulationFemale,'ascend');
-    
-    ageLikelihoodMale = popTable{:,startsWith(popTable.Properties.VariableNames,'male')};
-    ageLikelihoodMale(popTable.matrixID,:) = ageLikelihoodMale;
-    ageLikelihoodMale = ageLikelihoodMale(:,ageIndexMale); %just in case the tables aren't ordered properly
-    popTable.male = sum(ageLikelihoodMale,2);
-    ageLikelihoodMale = cumsum(ageLikelihoodMale,2);
-    ageLikelihoodMale = ageLikelihoodMale ./ (ageLikelihoodMale(:,end) * ones(1,size(ageLikelihoodMale,2)));
-    
-    ageLikelihoodFemale = popTable{popTable.matrixID,startsWith(popTable.Properties.VariableNames,'female')};
-    ageLikelihoodFemale(popTable.matrixID,:) = ageLikelihoodFemale;
-    ageLikelihoodFemale = ageLikelihoodFemale(:,ageIndexFemale); %just in case the tables aren't ordered properly
-    popTable.male = sum(ageLikelihoodFemale,2);
-    ageLikelihoodFemale = cumsum(ageLikelihoodFemale,2);
-    ageLikelihoodFemale = ageLikelihoodFemale ./ (ageLikelihoodFemale(:,end) * ones(1,size(ageLikelihoodFemale,2)));
-    
-    ageLikelihood = ageLikelihoodMale;
-    ageLikelihood(:,:,2) = ageLikelihoodFemale;
-    agePointsPopulation = agePointsPopulationMale;
-    
-    popTable.female = sum(popTable{:,startsWith(popTable.Properties.VariableNames,'female')},2);
-    popTable = popTable(:,{'population','male','female','matrixID'});
-    
+
     locationLikelihood = zeros(height(locations),1);
     locationLikelihood(popTable.matrixID) = popTable.population;
     locationLikelihood = locationLikelihood / sum(locationLikelihood);
     locationLikelihood = cumsum(locationLikelihood);
-    
-    genderLikelihood = popTable.male ./ popTable.population;
-    genderLikelihood(popTable.matrixID) = genderLikelihood;
 else
     locationLikelihood = ones(height(locations),1) / height(locations);
     locationLikelihood = cumsum(locationLikelihood);
@@ -106,11 +124,8 @@ else
 end
 
 if(~isempty(modelParameters.survivalFile))
-    if(ispc)
-        survivalTable = readtable(modelParameters.survivalFile,'UseExcel',false);
-    else
-        survivalTable = readtable(modelParameters.survivalFile);
-    end
+    
+    survivalTable = readtable(modelParameters.survivalFile);
 
     if ismember('Year', survivalTable.Properties.VariableNames)
         % --- TIME-VARYING: pre-interpolate to one value per year between
@@ -165,11 +180,8 @@ else
 end
 
 if(~isempty(modelParameters.fertilityFile))
-    if(ispc)
-        fertilityTable = readtable(modelParameters.fertilityFile,'UseExcel',false);
-    else
-        fertilityTable = readtable(modelParameters.fertilityFile);
-    end
+    
+    fertilityTable = readtable(modelParameters.fertilityFile);
 
     if ismember('Year', fertilityTable.Properties.VariableNames)
         % --- TIME-VARYING: pre-interpolate to annual values, producing a 3D
@@ -220,11 +232,7 @@ end
 
 %any additional age-specific factors ought to be handled here
 if(~isempty(modelParameters.agePreferencesFile))
-    if(ispc)
-        agePrefTable = readtable(modelParameters.agePreferencesFile,'UseExcel',false);
-    else
-        agePrefTable = readtable(modelParameters.agePreferencesFile);
-    end
+    agePrefTable = readtable(modelParameters.agePreferencesFile);
     agePointsPref = (agePrefTable.MaxAge)';
     
     ageDiscountRateFactor = agePrefTable.discRateAge;
@@ -233,3 +241,4 @@ else
     agePointsPref = [0 100];
     ageDiscountRateFactor = [1 1];  %no change in discount rate with age
 end
+                                                                                                                                                                                                                                      

@@ -2,7 +2,7 @@ function [agentParameters, modelParameters, networkParameters, mapParameters] = 
 
 %All model parameters go here
 modelParameters.spinupTime = 10; % in quarters, so 10 = 2.5 years
-modelParameters.numAgents = 2000; % Number of agents in the initial state of the model, changes through time based on demography
+modelParameters.numAgents = 100; % Number of agents in the initial state of the model, changes through time based on demography
 mapParameters.sizeX = 600;
 mapParameters.sizeY = 600;
 mapParameters.levelID = '_PCODE';
@@ -10,7 +10,7 @@ mapParameters.levelName = 'NAME_'; % captures NAME_1, NAME_2 from shapefile as s
 
 modelParameters.cycleLength = 4;
 modelParameters.startYear = 1985;
-modelParameters.endYear = 2085;
+modelParameters.endYear = 2050;
 modelParameters.sspScenario = 'SSP2';
 modelParameters.numCycles = modelParameters.endYear - modelParameters.startYear; % number of years; timeSteps = spinupTime + numCycles * cycleLength
 
@@ -70,9 +70,9 @@ mapParameters.filePath = './Data/Mada Admin 2/Admin_2_lat_lon.shp';
 % Demographic files - set to [] to use random fallback while data files are being prepared.
 % Restore these lines once survival_SSP2.csv, fertility_SSP2.csv, and a
 % population file with male_X/female_X age columns are in the Data folder.
-modelParameters.popFile       = [];  % './Data/1985_MDG_GHSPop_totals_by_region.csv'
-modelParameters.survivalFile  = [];  % ['./Data/survival_'  modelParameters.sspScenario '.csv']
-modelParameters.fertilityFile = [];  % ['./Data/fertility_' modelParameters.sspScenario '.csv']
+modelParameters.popFile       = './Data/1985_MDG_GHSPop_totals_by_region.csv';
+modelParameters.survivalFile  =  ['./Data/survival_'  modelParameters.sspScenario '.csv'];
+modelParameters.fertilityFile = ['./Data/fertility_' modelParameters.sspScenario '.csv'];
 
 modelParameters.agePreferencesFile  = './Data/age_specific_params.xls';
 modelParameters.utilityDataPath     = './Data';

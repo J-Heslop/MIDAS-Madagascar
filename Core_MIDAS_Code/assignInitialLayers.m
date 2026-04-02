@@ -19,7 +19,13 @@ for indexA = 1:length(agentList)
 
    %randomly assign a couple of the initial base layers
    %portfolioSet = createPortfolio([], find(utilityVariables.utilityBaseLayers(currentAgent.matrixLocation,:,1) ~= -9999),utilityVariables.utilityTimeConstraints, utilityVariables.utilityPrereqs, currentAgent.pAddFitElement, currentAgent.training, currentAgent.experience, utilityVariables.utilityAccessCosts, utilityVariables.utilityDuration, currentAgent.numPeriodsEvaluate, selectable, utilityVariables.utilityHistory(1,:,:), currentAgent.wealth, currentAgent.pBackCast, utilityVariables.utilityAccessCodesMat);
-   portfolioSet = createPortfolio([],find(selectable),utilityVariables.utilityTimeConstraints, utilityVariables.utilityPrereqs, currentAgent.pAddFitElement, currentAgent.training, currentAgent.experience, utilityVariables.utilityAccessCosts, utilityVariables.utilityDuration, currentAgent.numPeriodsEvaluate, selectable, utilityVariables.utilityHistory(1,:,:), currentAgent.wealth, currentAgent.pBackCast, utilityVariables.utilityAccessCodesMat, modelParameters);
+   % Only offer layers that are spatially available at this agent's location.
+   % A layer is unavailable at this location if utilityBaseLayers = 0 AND
+   % the slot is hard-capped (nExpected = 0 + hardSlotCountYN = true),
+   % which is how createUtilityLayers marks spatially restricted layers.
+   % Using utilityBaseLayers > 0 at t=1 (first spinup step) as a proxy.
+   locallyAvailable = selectable & (utilityVariables.utilityBaseLayers(currentAgent.matrixLocation,:,1)' > 0);
+   portfolioSet = createPortfolio([],find(locallyAvailable),utilityVariables.utilityTimeConstraints, utilityVariables.utilityPrereqs, currentAgent.pAddFitElement, currentAgent.training, currentAgent.experience, utilityVariables.utilityAccessCosts, utilityVariables.utilityDuration, currentAgent.numPeriodsEvaluate, selectable, utilityVariables.utilityHistory(1,:,:), currentAgent.wealth, currentAgent.pBackCast, utilityVariables.utilityAccessCodesMat, modelParameters);
 
    currentAgent.currentPortfolio = logical(portfolioSet(1,1:size(utilityVariables.utilityHistory,2)));
    if portfolioSet(end,end) == 0

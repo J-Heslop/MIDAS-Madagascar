@@ -111,6 +111,10 @@ end
 
 locNameVec = string(locations.(locNameField));
 
+% spatiallyRestricted(loc, layer) = true means that loc is OUTSIDE the
+% allowed region for that layer.  Used later to enforce hard-slot blocking.
+spatiallyRestricted = false(nLoc, nLayers);
+
 restrictTo = layerDefs.restrict_to;
 for iL = 1:nLayers
     if restrictTo(iL) ~= "ALL"
@@ -120,7 +124,10 @@ for iL = 1:nLayers
             warning('createUtilityLayers: layer "%s" restrict_to="%s" matched 0 locations in field "%s". Layer will be unavailable everywhere. Check spelling.', ...
                 char(layerDefs.name(iL)), char(restrictTo(iL)), locNameField);
         end
+        % Zero the base utility so income from this layer is 0 here
         utilityBaseLayers(~allowedRows, iL, :) = 0;
+        % Record which loc/layer combinations are restricted
+        spatiallyRestricted(~allowedRows, iL) = true;
     end
 end
 
@@ -173,6 +180,17 @@ for iL = 1:nLayers
         hardSlotCountYN(:, iL) = true;
     end
 end
+
+% Enforce spatial restrictions using the MIDAS hard-slot mechanism.
+% Setting nExpected = 0 and hardSlotCountYN = true for restricted
+% location/layer pairs means hasOpenSlots = false there, which causes
+% choosePortfolio.m to actively strip those layers from any portfolio:
+%   bestPortfolio(1,1:end-2) = hasOpenSlots(loc,:) & bestPortfolio(1,1:end-2)
+% This is necessary because the backcasting algorithm in createPortfolio.m
+% selects layers randomly without checking utility, so zeroing
+% utilityBaseLayers alone is not enough to prevent occupation.
+nExpected(spatiallyRestricted)      = 0;
+hardSlotCountYN(spatiallyRestricted) = true;
 
 %% -----------------------------------------------------------------------
 %% 8. UTILITY FORMS

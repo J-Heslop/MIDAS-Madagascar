@@ -50,7 +50,7 @@ postSpinup = spinupSteps+1 : T;
 
 TOD = output.agentSummary.TOD;   % vector of length = total agents ever
 numAgentsEver    = length(TOD);
-numInitialAgents = sum(sum(output.countAgentsPerLayer(:,:,10)));
+numInitialAgents = sum(sum(output.countAgentsPerLayer(:,:,1)));
 numBornInRun     = numAgentsEver - numInitialAgents;
 
 fprintf('\n--- POPULATION OVERVIEW ---\n');
