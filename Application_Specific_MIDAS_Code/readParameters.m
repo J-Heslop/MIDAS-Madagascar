@@ -11,7 +11,7 @@ mapParameters.levelName = 'NAME_'; % captures NAME_1, NAME_2 from shapefile as s
 modelParameters.cycleLength = 4;
 modelParameters.startYear = 1985;
 modelParameters.endYear = 2050;
-modelParameters.sspScenario = 'SSP2';
+modelParameters.sspScenario = 'SSP5';
 modelParameters.numCycles = modelParameters.endYear - modelParameters.startYear; % number of years; timeSteps = spinupTime + numCycles * cycleLength
 
 modelParameters.incomeInterval = 1;
