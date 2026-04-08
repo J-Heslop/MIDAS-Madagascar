@@ -86,6 +86,7 @@ agentParameters.shareCostThresholdMean = 0.3;
 agentParameters.shareCostThresholdSD = 0;
 agentParameters.wealthMean = 0;
 agentParameters.wealthSD = 0;
+agentParameters.subsistence_costs = 0.3;
 agentParameters.interactMean = 0.8;
 agentParameters.interactSD = 0;
 agentParameters.meetNewMean = 0.1;

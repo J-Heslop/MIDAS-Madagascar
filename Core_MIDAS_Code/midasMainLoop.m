@@ -340,7 +340,7 @@ for indexT = 1:modelParameters.timeSteps
                     
                 end
             end
-            currentAgent.wealth = currentAgent.wealth + newIncome - sum(actualPayments);
+            currentAgent.wealth = currentAgent.wealth + newIncome - sum(actualPayments) - agentParameters.subsistence_costs;
             currentAgent.wealthHistory{indexT} = currentAgent.wealth;
         end
     end %if (mod(indexT, modelParameters.incomeInterval) == 0)
