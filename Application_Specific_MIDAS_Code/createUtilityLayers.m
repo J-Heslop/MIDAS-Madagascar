@@ -67,15 +67,127 @@ utilityBaseLayers = zeros(nLoc, nLayers, timeSteps + leadTime);
 quarterShare = incomeQs ./ sum(incomeQs, 2);
 quarterShare(isnan(quarterShare)) = 0;
 
-% Fill the simulation period (after spinup) cycle by cycle.
-% To add SPEI drought modulation later, replace mean_utility_by_layer(iL)
-% with a time-varying value indexed by iCyc.
+% --- SPEI drought modulation -------------------------------------------
+% Layers with drought_k > 0 in utility_layers_v1.csv have their base
+% utility scaled each year by a yield factor derived from SPEI-6 at the
+% crop's harvest month.
+%
+% Yield function (Doorenbos-Kassam):
+%   yield_factor = clamp(1 + k * min(0, SPEI6), min_yield, 1.0)
+% Only negative SPEI (drought) reduces yield; wet years give no bonus.
+%
+% CEDA_SPEI.csv must be placed in the same Data/ folder as
+% utility_layers_v1.csv.  Column format: madagascar_Africa_spei06:MM-YYYY
+% Rows = 22 Madagascar ADM2 regions.
+
+nSimYears = timeSteps / modelParameters.cycleLength;
+firstYear = modelParameters.startYear;
+
+% yieldFactor(iLoc, iL, iCyc): default 1.0 (no drought effect)
+yieldFactor = ones(nLoc, nLayers, nSimYears);
+
+% Identify layers that have drought parameters defined
+hasDroughtCols = ismember('drought_k', layerDefs.Properties.VariableNames) && ...
+                 ismember('drought_min_yield', layerDefs.Properties.VariableNames) && ...
+                 ismember('drought_harvest_month', layerDefs.Properties.VariableNames);
+
+droughtLayerIdx = [];
+if hasDroughtCols
+    droughtLayerIdx = find(~isnan(layerDefs.drought_k) & layerDefs.drought_k > 0);
+end
+
+if ~isempty(droughtLayerIdx)
+    % Resolve SPEI file: use SSP-specific file if available, else fall back
+    % to the base CEDA_SPEI.csv (historical only).
+    if isfield(modelParameters, 'speiFile') && exist(modelParameters.speiFile, 'file')
+        speiPath = modelParameters.speiFile;
+    else
+        speiPath = fullfile(fileparts(modelParameters.utilityLayersFile), 'CEDA_SPEI.csv');
+    end
+
+    if ~exist(speiPath, 'file')
+        warning('createUtilityLayers: SPEI file not found at %s — running without drought modulation.\nPlace CEDA_SPEI.csv (or CEDA_SPEI_SSP2/SSP5.csv) in the Data/ folder.', speiPath);
+    else
+        % --- Read SPEI CSV -------------------------------------------------
+        % Read raw header to preserve the original column names (colons and
+        % dashes are not valid MATLAB identifiers, so we work with indices).
+        fid = fopen(speiPath, 'r');
+        rawHeader = strsplit(fgetl(fid), ',');
+        fclose(fid);
+
+        speiTable      = readtable(speiPath);
+        speiRegionNames = string(speiTable{:, 1});  % first column = region name
+        speiValues      = table2array(speiTable(:, 2:end)); % [22 x nSpeiCols]
+        % rawHeader(1) = 'name'; rawHeader(2:end) align with speiValues columns.
+        speiColHeaders  = rawHeader(2:end);   % cell array matching speiValues cols
+
+        % --- Build location → SPEI-row lookup (vectorised) -----------------
+        % Resolve which name field the locations table uses.
+        if ismember('source_NAME_2', locations.Properties.VariableNames)
+            locNamesSpei = string(locations.source_NAME_2);
+        elseif ismember('source_ADM2_FR', locations.Properties.VariableNames)
+            locNamesSpei = string(locations.source_ADM2_FR);
+        else
+            srcFlds = locations.Properties.VariableNames( ...
+                startsWith(locations.Properties.VariableNames, 'source_'));
+            locNamesSpei = string(locations.(srcFlds{1}));
+        end
+
+        locToSpeiRow = zeros(nLoc, 1);
+        for iLoc = 1:nLoc
+            idx = find(speiRegionNames == locNamesSpei(iLoc), 1);
+            if ~isempty(idx)
+                locToSpeiRow(iLoc) = idx;
+            end
+        end
+
+        % --- Compute yield factors per layer, cycle and location -----------
+        for iL = droughtLayerIdx'
+            k_val   = layerDefs.drought_k(iL);
+            min_y   = layerDefs.drought_min_yield(iL);
+            h_month = layerDefs.drought_harvest_month(iL);
+
+            for iCyc = 1:nSimYears
+                yr = firstYear + iCyc - 1;
+
+                % Find the SPEI-6 column for this crop's harvest month and year
+                targetCol = sprintf('madagascar_Africa_spei06:%02d-%d', h_month, yr);
+                colIdx    = find(strcmp(speiColHeaders, targetCol), 1);
+
+                if isempty(colIdx)
+                    continue;  % year not in CSV, leave factor = 1.0
+                end
+
+                % Vectorised: gather SPEI values for all locations at once
+                speiVals = NaN(nLoc, 1);
+                validLoc = locToSpeiRow > 0;
+                speiVals(validLoc) = speiValues(locToSpeiRow(validLoc), colIdx);
+
+                % Mask missing values (-999.99 fill)
+                missingMask = isnan(speiVals) | speiVals < -100;
+
+                % yield_factor = clamp(1 + k * min(0, SPEI), min_yield, 1.0)
+                raw    = 1 + k_val .* min(0, speiVals);
+                factor = max(min_y, min(1.0, raw));
+                factor(missingMask) = 1.0;
+
+                yieldFactor(:, iL, iCyc) = factor;
+            end
+        end
+
+        fprintf('createUtilityLayers: SPEI drought modulation applied to %d layer(s).\n', ...
+            length(droughtLayerIdx));
+    end
+end
+
+% --- Fill simulation period (after spinup), applying drought factors ---
 for iL = 1:nLayers
-    for iCyc = 1:(timeSteps / modelParameters.cycleLength)
+    for iCyc = 1:nSimYears
         tStart = leadTime + (iCyc - 1) * modelParameters.cycleLength + 1;
         for iQ = 1:modelParameters.cycleLength
             utilityBaseLayers(:, iL, tStart + iQ - 1) = ...
-                mean_utility_by_layer(iL) * quarterShare(iL, iQ);
+                mean_utility_by_layer(iL) * quarterShare(iL, iQ) ...
+                .* yieldFactor(:, iL, iCyc);
         end
     end
 end

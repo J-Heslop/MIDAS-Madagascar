@@ -77,6 +77,10 @@ modelParameters.fertilityFile = ['./Data/fertility_' modelParameters.sspScenario
 modelParameters.agePreferencesFile  = './Data/age_specific_params.xls';
 modelParameters.utilityDataPath     = './Data';
 modelParameters.utilityLayersFile   = './Data/utility_layers_v1.csv'; % swap filename to switch layer configurations
+% SSP-specific SPEI file for drought modulation in createUtilityLayers.m.
+% generate_spei_projections.py writes CEDA_SPEI_SSP2.csv and CEDA_SPEI_SSP5.csv
+% to the Data/ folder.  Falls back to CEDA_SPEI.csv if SSP file not found.
+modelParameters.speiFile = ['./Data/CEDA_SPEI_' modelParameters.sspScenario '.csv'];
 modelParameters.saveImg = true;
 modelParameters.shortName = 'Mada_toy_application';
 agentParameters.currentID = 1;
