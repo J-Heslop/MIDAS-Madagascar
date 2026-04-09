@@ -66,12 +66,12 @@ import sys
 # CONFIGURATION
 # ---------------------------------------------------------------------------
 
-CEDA_CSV      = os.path.join('..', 'ISF - Migration modelling consultancy',
-                              'Datasets', 'CEDA_SPEI.csv')
-GRMA_DELTAS   = os.path.join('.', 'Data', 'GRMA_SPEI_deltas.csv')
-OUT_DIR       = os.path.join('.', 'Data')
-OUT_SSP2      = os.path.join(OUT_DIR, 'CEDA_SPEI_SSP2.csv')
-OUT_SSP5      = os.path.join(OUT_DIR, 'CEDA_SPEI_SSP5.csv')
+CEDA_CSV      = 'C:\\Users\\Jack\\OneDrive - University of East Anglia\\ISF - Migration modelling consultancy\\Datasets\\CEDA_SPEI.csv'
+GRMA_DELTAS   = 'C:\\Users\\Jack\\OneDrive - University of East Anglia\\Documents\\GitHub\\MIDAS-Madagascar\\Data\\GRMA_SPEI_deltas.csv'
+
+OUT_DIR       = 'C:\\Users\\Jack\\OneDrive - University of East Anglia\\Documents\\GitHub\\MIDAS-Madagascar\\Data\\'
+OUT_SSP2      = 'C:\\Users\\Jack\\OneDrive - University of East Anglia\\Documents\\GitHub\\MIDAS-Madagascar\\Data\\CEDA_SPEI_SSP2.csv'
+OUT_SSP5      = 'C:\\Users\\Jack\\OneDrive - University of East Anglia\\Documents\\GitHub\\MIDAS-Madagascar\\Data\\CEDA_SPEI_SSP5.csv'
 
 OBS_START  = 1981
 OBS_END    = 2022
@@ -82,9 +82,34 @@ MISSING    = -999.99   # CEDA fill value
 SPEI_MIN   = -3.5
 SPEI_MAX   =  2.5
 
-# Fallback rates (SPEI units/year of ADDITIONAL drying beyond observed trend).
-# Only used if GRMA_SPEI_deltas.csv is absent.
-FALLBACK_EXTRA = {'SSP2': 0.004, 'SSP5': 0.010}
+# ---------------------------------------------------------------------------
+# PROJECTION TARGETS
+# ---------------------------------------------------------------------------
+# The GRMA frequency×intensity metric captures drought-period SPEI only, so
+# the raw GRMA deltas are too small (~0.01-0.13 SPEI) to drive meaningful
+# SSP differentiation on their own.  Instead we use a two-component approach:
+#
+#   1. IPCC AR6 CMIP6 ensemble-mean targets set the Madagascar-wide magnitude
+#      and properly separate SSP2 from SSP5 (ratio ~2.5×).
+#      Source: IPCC AR6 Ch.11 + Interactive Atlas, East Africa / SADC region.
+#
+#   2. GRMA SSP5-2085 deltas provide the SPATIAL WEIGHTS — which regions dry
+#      faster than others — normalised so the cross-region mean weight = 1.0
+#      and clipped to [GRMA_WEIGHT_MIN, GRMA_WEIGHT_MAX].
+#
+# Final regional delta = IPCC_target(ssp, yr) × spatial_weight(region)
+#
+# Fallback (if GRMA_SPEI_deltas.csv absent): uniform IPCC targets, no spatial
+# differentiation.
+
+IPCC_TARGETS = {
+    # (mean SPEI change across Madagascar at each horizon, relative to 2022)
+    'SSP2': {2050: -0.15, 2085: -0.30},   # SSP2-4.5: moderate drying
+    'SSP5': {2050: -0.35, 2085: -0.75},   # SSP5-8.5: stronger drying (~2.5× SSP2)
+}
+
+GRMA_WEIGHT_MIN = 0.3   # floor: even low-signal regions receive some drying
+GRMA_WEIGHT_MAX = 1.8   # cap: prevents extreme outliers dominating
 
 SPEI6_PREFIX = 'madagascar_Africa_spei06'
 RANDOM_SEED  = 42
@@ -123,38 +148,47 @@ def clamp(v, lo, hi):
     return max(lo, min(hi, v))
 
 # ---------------------------------------------------------------------------
-# LOAD GRMA REGIONAL DELTAS (if available)
+# LOAD GRMA SPATIAL WEIGHTS (if available)
 # ---------------------------------------------------------------------------
+# Use the GRMA SSP5-2085 delta as the spatial weighting pattern only.
+# Normalise so the cross-region mean weight = 1.0, then clip to [min, max].
+# Both SSP2 and SSP5 share the same spatial pattern; they differ in magnitude
+# via IPCC_TARGETS above.
 
-grma_deltas = {}   # grma_deltas[region] = {'SSP2': {2050: x, 2085: y}, 'SSP5': ...}
+grma_weights = {}   # grma_weights[region] = normalised weight (float)
 
 if os.path.exists(GRMA_DELTAS):
-    print(f"Loading GRMA regional deltas from {GRMA_DELTAS} ...")
+    print(f"Loading GRMA spatial weights from {GRMA_DELTAS} ...")
+    raw_weights = {}
     with open(GRMA_DELTAS, newline='', encoding='utf-8') as f:
         reader = csv.DictReader(f)
         for row in reader:
             reg = row['NAME_2']
-            grma_deltas[reg] = {
-                'SSP2': {2050: float(row['delta_ssp2_2050']),
-                         2085: float(row['delta_ssp2_2085'])},
-                'SSP5': {2050: float(row['delta_ssp5_2050']),
-                         2085: float(row['delta_ssp5_2085'])},
-            }
-    print(f"  Loaded deltas for {len(grma_deltas)} regions.")
+            # Use SSP5-2085 as the spatial pattern (strongest signal in GRMA data).
+            # Negate so larger drying delta → larger positive weight.
+            raw_weights[reg] = -float(row['delta_ssp5_2085'])
 
-    # Print summary
-    for ssp in ('SSP2', 'SSP5'):
-        d2050 = [grma_deltas[r][ssp][2050] for r in grma_deltas]
-        d2085 = [grma_deltas[r][ssp][2085] for r in grma_deltas]
-        print(f"  {ssp}: mean delta 2050={sum(d2050)/len(d2050):+.4f}, "
-              f"2085={sum(d2085)/len(d2085):+.4f}  "
-              f"(range 2085: {min(d2085):+.4f} to {max(d2085):+.4f})")
+    # Normalise to mean = 1.0
+    mean_raw = sum(raw_weights.values()) / len(raw_weights)
+    if abs(mean_raw) < 1e-9:
+        print("  WARNING: mean GRMA weight is near zero — using uniform weights.")
+        grma_weights = {r: 1.0 for r in raw_weights}
+    else:
+        for reg, w in raw_weights.items():
+            clipped = max(GRMA_WEIGHT_MIN, min(GRMA_WEIGHT_MAX, w / mean_raw))
+            grma_weights[reg] = clipped
+
+    print(f"  Spatial weights for {len(grma_weights)} regions "
+          f"(range: {min(grma_weights.values()):.2f}–{max(grma_weights.values()):.2f}, "
+          f"mean: {sum(grma_weights.values())/len(grma_weights):.2f}):")
+    for reg in sorted(grma_weights, key=lambda r: -grma_weights[r])[:5]:
+        print(f"    {reg:25s}  weight={grma_weights[reg]:.3f}")
+    print(f"    ...")
     use_grma = True
 else:
     print(f"WARNING: {GRMA_DELTAS} not found.")
-    print("         Run extract_grma_spei_stats.m in MATLAB first to generate it.")
-    print(f"         Falling back to uniform additional drying rates: "
-          f"SSP2={FALLBACK_EXTRA['SSP2']}/yr, SSP5={FALLBACK_EXTRA['SSP5']}/yr")
+    print("         Run extract_grma_spei_stats.m in MATLAB first.")
+    print("         Falling back to uniform IPCC targets (no spatial differentiation).")
     use_grma = False
 
 # ---------------------------------------------------------------------------
@@ -218,23 +252,23 @@ for reg in regions:
         residuals        = [y - (slope * x + intercept) for x, y in zip(xs, ys)]
 
         for ssp in ('SSP2', 'SSP5'):
-            for yr in range(PROJ_START, PROJ_END + 1):
+            # Spatial weight: GRMA-derived if available, else 1.0 (uniform)
+            weight = grma_weights.get(reg, 1.0) if use_grma else 1.0
 
-                # Observed trend component (per-month, per-region)
+            # IPCC target magnitudes for this SSP at 2050 and 2085
+            t50 = IPCC_TARGETS[ssp][2050] * weight
+            t85 = IPCC_TARGETS[ssp][2085] * weight
+
+            for yr in range(PROJ_START, PROJ_END + 1):
+                # Observed trend continues forward from 2022
                 obs_trend = slope * (yr - OBS_END)
 
-                # GRMA regional delta component (anchored at 2050 and 2085)
-                if use_grma and reg in grma_deltas:
-                    d50 = grma_deltas[reg][ssp][2050]
-                    d85 = grma_deltas[reg][ssp][2085]
-                    grma_component = interp_delta(yr, 0.0, d50, d85)
-                else:
-                    # Fallback: uniform additional drying rate
-                    extra = FALLBACK_EXTRA[ssp]
-                    grma_component = -extra * (yr - OBS_END)
+                # Climate change component: IPCC magnitude × GRMA spatial weight,
+                # linearly interpolated between 2022 (=0), 2050, and 2085
+                cc_component = interp_delta(yr, 0.0, t50, t85)
 
                 noise = random.choice(residuals)
-                raw   = trend_at_2022 + obs_trend + grma_component + noise
+                raw   = trend_at_2022 + obs_trend + cc_component + noise
                 proj[ssp][reg][mo][yr] = clamp(raw, SPEI_MIN, SPEI_MAX)
 
 print("Projections computed.")

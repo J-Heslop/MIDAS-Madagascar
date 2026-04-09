@@ -53,10 +53,10 @@ fprintf('Variables in baseline file:\n');
 for iV = 1:length(info.Variables)
     v = info.Variables(iV);
     v.Attributes
-    %dimNames = {v.Dimensions.Name};
-    %dimSizes = [v.Dimensions.Length];
-    %fprintf('  %-15s  dims: [%s]  size: [%s]\n', v.Name, ...
-    %    strjoin(dimNames, ' x '), num2str(dimSizes));
+    dimNames = {v.Dimensions.Name};
+    dimSizes = [v.Dimensions.Length];
+    fprintf('  %-15s  dims: [%s]  size: [%s]\n', v.Name, ...
+        strjoin(dimNames, ' x '), num2str(dimSizes));
 end
 
 lon = double(ncread(files.baseline, 'longitude'));  % coordinate vector
