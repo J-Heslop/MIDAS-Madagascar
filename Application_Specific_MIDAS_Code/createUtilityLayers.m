@@ -189,6 +189,186 @@ if ~isempty(grmaLayerIdx)
         nGrmaApplied, modelParameters.sspScenario);
 end
 
+% --- Inter-annual drought variability (Markov chain) ----------------------
+% When modelParameters.droughtVariabilityOn == true, each agricultural
+% layer's yield factor is perturbed year-by-year using a region-specific
+% two-state (drought / normal) Markov chain driven by observed SPEI6
+% climatology.
+%
+% Parameters are read from drought_markov_params.csv (one row per
+% region × layer).  Each region starts in a drought/normal state drawn
+% from its stationary distribution (pi_D), then transitions are simulated
+% forward.  In drought years a SPEI6 value is sampled from N(mu_d, sd_d)
+% and the perturbation applied is:
+%
+%   delta = droughtScaleFactor * SPEI6_sample   (negative; subtracts from yield)
+%   yieldFactor(loc, layer, year) = clip(yieldFactor + delta, 0, 1)
+%
+% Normal years carry no perturbation (perturbation = 0).
+%
+% Tune modelParameters.droughtScaleFactor to control magnitude.
+% Keep droughtVariabilityOn = false during calibration.
+
+if isfield(modelParameters, 'droughtVariabilityOn') && modelParameters.droughtVariabilityOn
+
+    markovFile = modelParameters.droughtMarkovFile;
+    scaleFac   = modelParameters.droughtScaleFactor;
+
+    if ~exist(markovFile, 'file')
+        warning('createUtilityLayers: droughtMarkovFile not found: %s\n  Inter-annual variability skipped.', markovFile);
+    elseif isempty(grmaLayerIdx)
+        warning('createUtilityLayers: droughtVariabilityOn=true but no GRMA crop layers found. Skipped.');
+    else
+        % Load Markov parameter table
+        MP = readtable(markovFile, 'TextType', 'string');
+
+        % ----------------------------------------------------------------
+        % STEP 1: Pre-generate drought state sequence (nLoc x nSimYears)
+        % using one shared spatial correlation matrix (average across crop
+        % layers).  All layers within the same region share the same
+        % drought/normal state sequence — only the yield perturbation
+        % magnitude varies by layer (different harvest month distributions
+        % and Ky values).  This ensures a drought year for rice coincides
+        % with a drought year for cassava in the same region.
+        % ----------------------------------------------------------------
+
+        % Use the rice_south (representative) layer to extract p_DD/p_ND/pi_D
+        % for the shared state simulation — these are nearly identical across
+        % layers for the same region.
+        refLayer   = 'rice_south';
+        refRows    = MP(MP.layer == refLayer, :);
+
+        p_DD_vec  = zeros(nLoc, 1);
+        p_ND_vec  = zeros(nLoc, 1);
+        pi_D_vec  = zeros(nLoc, 1);
+        hasParams = false(nLoc, 1);
+
+        for iLoc = 1:nLoc
+            rowIdx = find(refRows.region == locNamesGrma(iLoc), 1);
+            if ~isempty(rowIdx)
+                p_DD_vec(iLoc)  = refRows.p_DD(rowIdx);
+                p_ND_vec(iLoc)  = refRows.p_ND(rowIdx);
+                pi_D_vec(iLoc)  = refRows.pi_D(rowIdx);
+                hasParams(iLoc) = true;
+            end
+        end
+
+        % Load shared spatial correlation matrix
+        sharedCorrFile = fullfile(grmaDataDir, 'spei6_corr_shared.csv');
+        useCorr = false;
+        if exist(sharedCorrFile, 'file')
+            CT          = readtable(sharedCorrFile, 'ReadRowNames', true, 'TextType', 'string');
+            corrRegions = string(CT.Properties.RowNames);
+
+            locToCorrRow = zeros(nLoc, 1);
+            for iLoc = 1:nLoc
+                idx = find(corrRegions == locNamesGrma(iLoc), 1);
+                if ~isempty(idx); locToCorrRow(iLoc) = idx; end
+            end
+
+            validIdx = find(hasParams & locToCorrRow > 0);
+            nValid   = numel(validIdx);
+
+            if nValid > 1
+                corrRows = locToCorrRow(validIdx);
+                R = table2array(CT(corrRows, corrRows));
+                R = (R + R') / 2;
+                minEig = min(eig(R));
+                if minEig < 1e-8
+                    R = R + (abs(minEig) + 1e-6) * eye(nValid);
+                end
+                try
+                    cholL   = chol(R, 'lower');
+                    useCorr = true;
+                catch
+                    warning('createUtilityLayers: Cholesky failed for shared correlation matrix. Using independent transitions.');
+                end
+            end
+        else
+            warning('createUtilityLayers: spei6_corr_shared.csv not found. Using independent regional transitions.');
+        end
+
+        % Initialise states from stationary distribution
+        droughtStates = zeros(nLoc, nSimYears);   % 1 = drought, 0 = normal
+        if useCorr
+            z0 = cholL * randn(nValid, 1);
+            state_vec = zeros(nLoc, 1);
+            state_vec(validIdx) = double(normcdf(z0) < pi_D_vec(validIdx));
+        else
+            state_vec = zeros(nLoc, 1);
+            state_vec(hasParams) = double(rand(sum(hasParams), 1) < pi_D_vec(hasParams));
+        end
+
+        % Simulate Markov chain forward — one shared sequence for all layers
+        for iCyc = 1:nSimYears
+            if useCorr
+                u_all = normcdf(cholL * randn(nValid, 1));
+            else
+                u_all = rand(sum(hasParams), 1);
+            end
+            locsToUpdate = validIdx;   % or find(hasParams) if !useCorr
+
+            for k = 1:numel(locsToUpdate)
+                iLoc = locsToUpdate(k);
+                if state_vec(iLoc) == 1
+                    state_vec(iLoc) = double(u_all(k) < p_DD_vec(iLoc));
+                else
+                    state_vec(iLoc) = double(u_all(k) < p_ND_vec(iLoc));
+                end
+            end
+            droughtStates(:, iCyc) = state_vec;
+        end
+
+        % ----------------------------------------------------------------
+        % STEP 2: Apply layer-specific yield perturbations using the
+        % shared drought state sequence.  Each layer has its own SPEI6
+        % distribution (harvest month, Ky) so magnitude varies by layer.
+        % ----------------------------------------------------------------
+
+        nMarkovApplied = 0;
+        for iL = grmaLayerIdx'
+            layerName = char(layerDefs.name(iL));
+            layerRows = MP(MP.layer == layerName, :);
+            if isempty(layerRows)
+                warning('createUtilityLayers: no Markov params for layer "%s". Skipping.', layerName);
+                continue;
+            end
+
+            % Build per-location SPEI6 distribution vectors for this layer
+            mu_d_vec = zeros(nLoc, 1);
+            sd_d_vec = ones(nLoc, 1);
+
+            for iLoc = 1:nLoc
+                rowIdx = find(layerRows.region == locNamesGrma(iLoc), 1);
+                if ~isempty(rowIdx)
+                    mu_d_vec(iLoc) = layerRows.drought_spei_mean(rowIdx);
+                    sd_d_vec(iLoc) = layerRows.drought_spei_std(rowIdx);
+                end
+            end
+
+            % Apply perturbations: drought state is shared, magnitude is layer-specific
+            for iCyc = 1:nSimYears
+                for iLoc = 1:nLoc
+                    if ~hasParams(iLoc); continue; end
+                    if droughtStates(iLoc, iCyc) == 1
+                        spei6_sample = mu_d_vec(iLoc) + sd_d_vec(iLoc) * randn();
+                        delta = scaleFac * spei6_sample;   % SPEI6 negative in drought → negative delta
+                    else
+                        delta = 0;
+                    end
+                    yieldFactor(iLoc, iL, iCyc) = ...
+                        min(1.0, max(0.0, yieldFactor(iLoc, iL, iCyc) + delta));
+                end
+            end
+            nMarkovApplied = nMarkovApplied + 1;
+        end
+
+        fprintf(['createUtilityLayers: drought Markov variability applied to %d layer(s) ' ...
+                 '[scaleFactor=%.3f, spatialCorr=%d, sharedState=true].\n'], ...
+                 nMarkovApplied, scaleFac, useCorr);
+    end
+end
+
 % --- Fill simulation period (after spinup), applying drought factors ---
 for iL = 1:nLayers
     for iCyc = 1:nSimYears
