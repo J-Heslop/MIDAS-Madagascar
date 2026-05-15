@@ -37,7 +37,7 @@ demographicVariables.ageDiscountRateFactor = ageDiscountRateFactor;
 %they experienced or learned.  This structure allows an arbitrarily large
 %landscape with an arbitrarily large number of agents, without wasting
 %memory
-[utilityLayerFunctions, utilityHistory, utilityAccessCosts, utilityTimeConstraints, utilityDuration, utilityAccessCodesMat, utilityPrereqs, utilityBaseLayers, utilityForms, incomeForms, nExpected, hardSlotCountYN] = createUtilityLayers(locations, modelParameters, demographicVariables);
+[utilityLayerFunctions, utilityHistory, utilityAccessCosts, utilityTimeConstraints, utilityDuration, utilityAccessCodesMat, utilityPrereqs, utilityBaseLayers, utilityForms, incomeForms, nExpected, hardSlotCountYN, localOnly] = createUtilityLayers(locations, modelParameters, demographicVariables);
 utilityVariables.numForms = max(utilityForms);
 utilityVariables.utilityLayerFunctions = utilityLayerFunctions;
 utilityVariables.utilityHistory = utilityHistory;
@@ -52,6 +52,7 @@ utilityVariables.utilityPrereqs = utilityPrereqs;
 utilityVariables.nExpected = nExpected;
 utilityVariables.hardSlotCountYN = hardSlotCountYN;
 utilityVariables.hasOpenSlots = false(size(hardSlotCountYN));
+utilityVariables.localOnly = logical(localOnly);  % flags agricultural (location-tied) layers
 
 
 %create agents and randomly allocate them to 'cities' - the term we use

@@ -28,6 +28,13 @@ migrationMatrix = zeros(numLocations,numLocations,modelParameters.timeSteps);
 portfolioHistory = cell(numLocations, modelParameters.timeSteps);
 trappedHistory = zeros(length(agentList),modelParameters.timeSteps);
 aspirationHistory = zeros(numLayers, modelParameters.timeSteps);
+% Food insecurity tracker: counts agents whose net income fell below subsistence_costs
+% Rows = locations, cols = timesteps. Separate counts for ag and all agents.
+agLayerIdx = find(utilityVariables.localOnly);  % indices of agricultural (local-only) layers
+foodInsecureCount_ag  = zeros(numLocations, modelParameters.timeSteps);
+foodInsecureCount_all = zeros(numLocations, modelParameters.timeSteps);
+agentCount_ag         = zeros(numLocations, modelParameters.timeSteps);
+agentCount_all        = zeros(numLocations, modelParameters.timeSteps);
 %wealthHistory = zeros(modelParameters.numAgents,modelParameters.timeSteps);
 
 %create a list of shared layers, for use in choosing new link
@@ -340,8 +347,30 @@ for indexT = 1:modelParameters.timeSteps
                     
                 end
             end
-            currentAgent.wealth = currentAgent.wealth + newIncome - sum(actualPayments) - agentParameters.subsistence_costs;
+            netIncome = newIncome - sum(actualPayments);
+            currentAgent.wealth = currentAgent.wealth + netIncome - agentParameters.subsistence_costs;
             currentAgent.wealthHistory{indexT} = currentAgent.wealth;
+
+            % --- Food insecurity tracking ---
+            % currentPortfolio is a logical row vector of length numLayers
+            % (set at line 296), and agLayerIdx is an integer index list
+            % of ag (location-tied) layers. The agent is an "ag agent" if
+            % any of its true entries fall at an ag-layer position.
+            % NB: an earlier version of this used ismember(currentPortfolio,
+            % agLayerIdx), which compares the 0/1 values of the logical
+            % vector against the layer indices and is always false.
+            loc = currentAgent.matrixLocation;
+            isAgAgent = any(currentPortfolio(agLayerIdx));
+            agentCount_all(loc, indexT) = agentCount_all(loc, indexT) + 1;
+            if netIncome < agentParameters.subsistence_costs
+                foodInsecureCount_all(loc, indexT) = foodInsecureCount_all(loc, indexT) + 1;
+            end
+            if isAgAgent
+                agentCount_ag(loc, indexT) = agentCount_ag(loc, indexT) + 1;
+                if netIncome < agentParameters.subsistence_costs
+                    foodInsecureCount_ag(loc, indexT) = foodInsecureCount_ag(loc, indexT) + 1;
+                end
+            end
         end
     end %if (mod(indexT, modelParameters.incomeInterval) == 0)
     
@@ -415,6 +444,12 @@ outputs.averageExpectedOpening = averageExpectedOpening;
 outputs.utilityHistory = utilityVariables.utilityHistory;
 outputs.portfolioHistory = portfolioHistory;
 outputs.trappedHistory = trappedHistory;
+% Food insecurity: fraction of agent-timesteps below subsistence (post-spinup, per location)
+spinupEnd = modelParameters.spinupTime + 1;
+outputs.foodInsecureCount_ag   = foodInsecureCount_ag(:,  spinupEnd:end);
+outputs.foodInsecureCount_all  = foodInsecureCount_all(:, spinupEnd:end);
+outputs.agentCount_ag          = agentCount_ag(:,         spinupEnd:end);
+outputs.agentCount_all         = agentCount_all(:,        spinupEnd:end);
 outputs.aspirationHistory = aspirationHistory;
 
 agentList = agentList(1:agentParameters.currentID-1);

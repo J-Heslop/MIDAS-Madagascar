@@ -14,7 +14,9 @@ series = 'MC_Run_';
 saveDirectory = './Outputs/';
 
 %number of runs
-modelRuns = 3;
+% For initial test: 20 runs. For a full calibration round: 200-500.
+% On HPC with parfor and 20 cores, 200 runs takes ~4-8 hours.
+modelRuns = 1;
 
 try load updatedMCParams
 catch
@@ -107,11 +109,18 @@ for indexI = 1:modelRuns
     experimentList{indexI} = experiment;
 end
 
+% Ensure output directory exists
+if ~exist(saveDirectory, 'dir')
+    mkdir(saveDirectory);
+end
+
 fprintf(['Saving Experiment List.\n']);
 save([saveDirectory 'experiment_' date '_input_summary'], 'experimentList', 'mcParams');
 
 runList = zeros(length(experimentList),1);
 %run the model
+% Use parfor on HPC (set workers via parpool before calling this function)
+% Use plain for loop for single-node testing
 %parfor indexI = 1:length(experimentList)
 for indexI = 1:length(experimentList)
     if(runList(indexI) == 0)

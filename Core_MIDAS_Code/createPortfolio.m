@@ -104,7 +104,7 @@ if isempty(portfolio)
                 end
             end
             if ~any(portfolio)
-                disp('Empty portfolio')
+                %disp('Empty portfolio')
             end
         end
 
@@ -405,7 +405,7 @@ end
 
 %Test for empty portfolios
 if isempty(portfolio)
-    test = 'empty portfolio in createPortfolio'
+    %test = 'empty portfolio in createPortfolio'
 end
 end
 

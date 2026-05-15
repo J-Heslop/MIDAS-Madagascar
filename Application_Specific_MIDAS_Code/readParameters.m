@@ -10,7 +10,7 @@ mapParameters.levelName = 'NAME_'; % captures NAME_1, NAME_2 from shapefile as s
 
 modelParameters.cycleLength = 4;
 modelParameters.startYear = 1985;
-modelParameters.endYear = 2050;
+modelParameters.endYear = 2025;  % calibration period only; change to 2050 for future projections
 modelParameters.sspScenario = 'SSP5';
 modelParameters.numCycles = modelParameters.endYear - modelParameters.startYear; % number of years; timeSteps = spinupTime + numCycles * cycleLength
 
@@ -40,6 +40,18 @@ modelParameters.remitRate = 0;
 modelParameters.creditMultiplier = 0.3;
 modelParameters.normalFloodMultiplier = 1;
 modelParameters.ruralUrbanTime = 0.2; %Proportion of time needed for transit between rural and urban layers of portfolio
+
+% Urban income multiplier (calibration scaffold).
+% Multiplies the mean_utility of every non-agricultural (localOnly == 0)
+% layer to scale the urban/rural relative payoff balance. The within-ag
+% relative incomes (rice, maize, cassava, vanilla, etc.) are anchored by
+% FAO yield data and the GRMA drought modulation, but the absolute
+% urban-vs-ag ratio in utility_layers_v1.csv has no empirical basis,
+% so we calibrate it here as a single global multiplier. Default 1.0
+% leaves the CSV values unchanged; calibrated value typically 0.5-1.5.
+% Once calibration converges, bake the chosen multiplier into the CSV
+% mean_utility column and remove this parameter.
+modelParameters.urbanIncomeMultiplier = 1.0;
 mapParameters.movingCostPerMile = 0;
 mapParameters.minDistForCost = 50;
 mapParameters.maxDistForCost = 400;

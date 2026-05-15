@@ -1,4 +1,4 @@
-function [ currentAgent] = trainingTracker(currentAgent, utilityVariables)
+function [ currentAgent] = trainingTracker(currentAgent, utilityVariables, modelParameters)
 %This function tracks how many periods of "training" an agent has received in
 %any given layer. To make this generalizable, we track the periods of
 %experience in each layer, even though not all layers may have formal
@@ -16,23 +16,7 @@ function [ currentAgent] = trainingTracker(currentAgent, utilityVariables)
 %portions of currentPortfolio and other bestPortfolios based on extra
 %period of training.
 
-%NEXT STEP - FIGURE OUT HOW TO INCORPORATE OTHER BEST PORTFOLIOS
-
 [i,j,s] = find(utilityVariables.utilityPrereqs);
-
-%Set Locations for identifying set of best portfolios that are stored
-%currentLocation = currentAgent.matrixLocation;
-%[sortedLocations,sortedIndex] = sortrows(currentAgent.bestPortfolioValues,-1);
-%sortedIndex = sortedIndex(sortedLocations > 0);
-%bestLocations = sortedIndex(1:min(length(sortedIndex),currentAgent.numBestLocation));
-%otherRandomLocations = find(any(currentAgent.knowsIncomeLocation,2));
-%randomLocations = otherRandomLocations(randperm(length(otherRandomLocations),min(length(otherRandomLocations),currentAgent.numRandomLocation)));
-%locationList = [currentLocation; bestLocations; randomLocations];
-
-%remove duplicates
-%[bSort,iSort] = sort(locationList);
-%locationList = locationList(iSort([true; diff(bSort)>0]),:);
-
 
 %Add increment of 1 period experience for each layer in agent's current
 %Portfolio
@@ -50,7 +34,8 @@ currentAgent.training(newCerts) = true;
 selectableLayers = selectableFlag(utilityVariables.utilityPrereqs, utilityVariables.utilityAccessCodesMat, utilityVariables.utilityAccessCosts, currentAgent.training, currentAgent.experience, [], [], utilityVariables.utilityDuration(:,2));
 
 if any(selectableLayers' & currentAgent.currentAspiration)
-    currentAgent.currentPortfolio = createPortfolio(currentAgent.currentAspiration, [],utilityVariables.utilityTimeConstraints, utilityVariables.utilityPrereqs, currentAgent.pAddFitElement, currentAgent.training, currentAgent.experience, utilityVariables.utilityAccessCosts, utilityVariables.utilityDuration, currentAgent.numPeriodsEvaluate, selectableLayers, [], currentAgent.wealth, currentAgent.pBackCast, utilityVariables.utilityAccessCodesMat);
+    currentAgent.currentPortfolio = createPortfolio(currentAgent.currentAspiration, [],utilityVariables.utilityTimeConstraints, utilityVariables.utilityPrereqs, currentAgent.pAddFitElement, currentAgent.training, currentAgent.experience, utilityVariables.utilityAccessCosts, utilityVariables.utilityDuration, currentAgent.numPeriodsEvaluate, selectableLayers, [], currentAgent.wealth, currentAgent.pBackCast, utilityVariables.utilityAccessCodesMat, modelParameters);
+
 %Adjust time of high-fidelity duration if new experience helps fulfill prereq
 else
     %Ensure portfolio is not empty
@@ -63,35 +48,33 @@ else
         %Figure out time left on any prereqs
         if any(prereqs)
             currentAgent.currentPortfolio(1,[prereqs']) = true;
-            test4 = currentAgent.currentPortfolio;
-            timeToTraining = max(utilityVariables.utilityDuration(prereqs) - currentAgent.experience(prereqs));
+            timeToTraining = max(utilityVariables.utilityDuration(prereqs,1) - currentAgent.experience(prereqs));
         else
             timeToTraining = 0;
         end
         %Figure out max time left in any time-bound layers
         timeLeftInLayer = min(min(utilityVariables.utilityDuration(logical(currentPortfolio),2) - currentAgent.experience(logical(currentPortfolio))), currentAgent.numPeriodsEvaluate);
+
         if timeLeftInLayer < timeToTraining
             highFidelityDuration = max(timeLeftInLayer,0);
-            
+
         else
             highFidelityDuration = max(timeToTraining,0);
         end
         currentAgent.currentPortfolio(1,end-1) = highFidelityDuration;
-        
-        
+
         %Add time to aspiration if there is one (and it already has a non-0 time horizon); else add time to intermediate portfolio
         if any(currentAgent.currentPortfolio(end,1:numLayers)) && currentAgent.currentPortfolio(end,end-1) > 0
             currentAgent.currentPortfolio(end,end-1) = currentAgent.numPeriodsEvaluate - sum(currentAgent.currentPortfolio(1:end-1,end-1));
         elseif height(currentAgent.currentPortfolio) > 2
-            currentAgent.currentPortfolio(end-1,end-1) = currentAgent.numPeriodsEvaluate - sum(currentAgent.currentPortfolio(end-2,end-1));
+            currentAgent.currentPortfolio(end-1,end-1) = currentAgent.numPeriodsEvaluate - sum(currentAgent.currentPortfolio(1:end-2,end-1));
         else
             currentAgent.currentPortfolio(1,end-1) = currentAgent.numPeriodsEvaluate;
         end
     end
-
 end
 
-%Now repeat for the B other best portfolios the agent has stored in each of L locations 
+%Now repeat for the B other best portfolios the agent has stored in each of L locations
 [sortedLocations, sortedIndex] = sortrows(currentAgent.bestPortfolioValues,-1);
 sortedIndex = sortedIndex(sortedLocations > 0);
 bestLocations = sortedIndex(1:min(length(sortedIndex),currentAgent.numBestLocation));
@@ -101,51 +84,51 @@ if ~isempty(bestLocations)
     for indexL = 1:length(bestLocations)
         locationIndex = bestLocations(indexL);
         nextBest = currentAgent.bestPortfolios{locationIndex,1};
+
         if ~isempty(nextBest)
             focalPortfolio = nextBest(1,1:numLayers)';
             focalAspiration = false(1,numLayers);
             if nextBest(end,end) == 0
-                focalAspiration = nextBest(end,1:numLayers);  
+                focalAspiration = nextBest(end,1:numLayers);
             end
             indAspiration = find(focalAspiration);
 
             if any(selectableLayers' & focalAspiration)
-                currentAgent.bestPortfolios{locationIndex} = createPortfolio(focalAspiration, [],utilityVariables.utilityTimeConstraints, utilityVariables.utilityPrereqs, currentAgent.pAddFitElement, currentAgent.training, currentAgent.experience, utilityVariables.utilityAccessCosts, utilityVariables.utilityDuration, currentAgent.numPeriodsEvaluate, selectableLayers, [], currentAgent.wealth, currentAgent.pBackCast, utilityVariables.utilityAccessCodesMat);
+                currentAgent.bestPortfolios{locationIndex} = createPortfolio(focalAspiration, [],utilityVariables.utilityTimeConstraints, utilityVariables.utilityPrereqs, currentAgent.pAddFitElement, currentAgent.training, currentAgent.experience, utilityVariables.utilityAccessCosts, utilityVariables.utilityDuration, currentAgent.numPeriodsEvaluate, selectableLayers, [], currentAgent.wealth, currentAgent.pBackCast, utilityVariables.utilityAccessCodesMat, modelParameters);
                 %Adjust time of high-fidelity duration if new experience helps fulfill prereq
             else
                 %Ensure portfolio is not empty
                 if any(focalPortfolio)
-    
+
                     %Identify any layers in currentPortfolio that are prereqs for aspiration
                     prereqs = j(i==indAspiration);
                     prereqs(prereqs == indAspiration) = [];
-    
+
                     %Figure out time left on any prereqs
                     if any(prereqs)
                         currentAgent.bestPortfolios{locationIndex}(1,[prereqs']) = true;
-                        test5 = currentAgent.bestPortfolios{locationIndex};
-                        timeToTraining = max(utilityVariables.utilityDuration(prereqs) - currentAgent.experience(prereqs));
+                        timeToTraining = max(utilityVariables.utilityDuration(prereqs,1) - currentAgent.experience(prereqs));
                     else
                         timeToTraining = 0;
                     end
-                        
+
                     %Figure out max time left in any time-bound layers
                     timeLeftInLayer = min(min(utilityVariables.utilityDuration(logical(focalPortfolio),2) - currentAgent.experience(logical(focalPortfolio))), currentAgent.numPeriodsEvaluate);
-                    
+
                     if timeLeftInLayer < timeToTraining
                         highFidelityDuration = max(timeLeftInLayer,0);
-                
+
                     else
                         highFidelityDuration = max(timeToTraining,0);
                     end
-    
+
                     currentAgent.bestPortfolios{locationIndex,1}(1,end-1) = highFidelityDuration;
-    
+
                     %Add time to aspiration if there is one (and it already has a non-0 time horizon); else add time to intermediate portfolio
                     if any(nextBest(end,1:numLayers)) && nextBest(end,end-1) > 0
                         currentAgent.bestPortfolios{locationIndex,1}(end,end-1) = currentAgent.numPeriodsEvaluate - sum(currentAgent.bestPortfolios{locationIndex,1}(1:end-1,end-1));
                     elseif height(nextBest) > 2
-                        currentAgent.bestPortfolios{locationIndex,1}(end-1,end-1) = currentAgent.numPeriodsEvaluate - sum(currentAgent.bestPortfolios{locationIndex,1}(end-2,end-1));
+                        currentAgent.bestPortfolios{locationIndex,1}(end-1,end-1) = currentAgent.numPeriodsEvaluate - sum(currentAgent.bestPortfolios{locationIndex,1}(1:end-2,end-1));
                     else
                         currentAgent.bestPortfolios{locationIndex,1}(1,end-1) = currentAgent.numPeriodsEvaluate;
                     end
@@ -155,5 +138,3 @@ if ~isempty(bestLocations)
      end
 end
 end
-
-

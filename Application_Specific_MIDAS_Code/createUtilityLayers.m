@@ -1,4 +1,4 @@
-function [ utilityLayerFunctions, utilityHistory, utilityAccessCosts, utilityTimeConstraints, utilityDuration, utilityAccessCodesMat, utilityPrereqs, utilityBaseLayers, utilityForms, incomeForms, nExpected, hardSlotCountYN ] = createUtilityLayers(locations, modelParameters, demographicVariables )
+function [ utilityLayerFunctions, utilityHistory, utilityAccessCosts, utilityTimeConstraints, utilityDuration, utilityAccessCodesMat, utilityPrereqs, utilityBaseLayers, utilityForms, incomeForms, nExpected, hardSlotCountYN, localOnly ] = createUtilityLayers(locations, modelParameters, demographicVariables )
 %createUtilityLayers builds all utility layer arrays from a CSV definition file.
 %
 % The CSV path is set by modelParameters.utilityLayersFile.
@@ -50,6 +50,16 @@ utilityHistory = zeros(nLoc, nLayers, timeSteps + leadTime);
 %% -----------------------------------------------------------------------
 
 mean_utility_by_layer = layerDefs.mean_utility;
+
+% Apply the urban income multiplier (calibration scaffold).
+% Scales mean_utility for every non-agricultural (localOnly == 0) layer to
+% calibrate the urban/rural relative payoff balance. See the parameter
+% definition in readParameters.m for rationale. Default 1.0 = no change.
+if isfield(modelParameters, 'urbanIncomeMultiplier')
+    urbanRows = (layerDefs.localOnly == 0);
+    mean_utility_by_layer(urbanRows) = ...
+        mean_utility_by_layer(urbanRows) * modelParameters.urbanIncomeMultiplier;
+end
 
 timeQs   = [layerDefs.timeQ1, layerDefs.timeQ2, layerDefs.timeQ3, layerDefs.timeQ4];
 incomeQs = [layerDefs.incomeQ1, layerDefs.incomeQ2, layerDefs.incomeQ3, layerDefs.incomeQ4];
@@ -535,5 +545,14 @@ end
 nExpected = tempExpected;
 
 utilityPrereqs = sparse(utilityPrereqs);
+
+%% -----------------------------------------------------------------------
+%% 11. LOCAL-ONLY FLAGS (agricultural / location-tied layers)
+%% -----------------------------------------------------------------------
+% localOnly(i) = 1 means layer i is tied to the agent's current location
+% (i.e., agricultural layers). Used for food insecurity tracking in
+% midasMainLoop.m and for urban/rural calibration in buildNextRound.m.
+
+localOnly = logical(layerDefs.localOnly);
 
 end
