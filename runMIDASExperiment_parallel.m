@@ -169,6 +169,22 @@ catch
     % Once calibrated, bake the chosen multiplier into the CSV and remove
     % the parameter for production runs.
     mcParams = [mcParams; {'modelParameters.urbanIncomeMultiplier', 0.5, 1.5, 0}];
+
+    % Drought sensitivity (SPEI -> yield-factor mapping). Used by
+    % createUtilityLayers.m in two places:
+    %   (a) Observation period 1985-2022: perturbs the GRMA baseline yield
+    %       factor by  delta = droughtScaleFactor * SPEI6_observed
+    %       using ERA5 SPEI-6 read from observed_spei_harvest.csv.
+    %   (b) Projection period 2023+: same perturbation but with SPEI
+    %       sampled from the region-specific Markov chain (gated by
+    %       modelParameters.droughtVariabilityOn).
+    % Calibration learns the right sensitivity from observed migration
+    % responses to observed historical droughts. The learned value
+    % carries forward unchanged into the projection-period drought
+    % perturbation, so the drought-migration coupling identified here
+    % is what drives future scenarios. Bracket 0.05-0.40 covers weak
+    % to strong drought sensitivity around the previous hard-coded 0.10.
+    mcParams = [mcParams; {'modelParameters.droughtScaleFactor', 0.05, 0.40, 0}];
 end
 
 %build the full design

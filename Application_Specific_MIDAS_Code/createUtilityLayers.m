@@ -199,6 +199,85 @@ if ~isempty(grmaLayerIdx)
         nGrmaApplied, modelParameters.sspScenario);
 end
 
+% --- Observed historical drought modulation (calibration period only) ----
+% Loads Data/observed_spei_harvest.csv (produced by apply_observed_drought.py)
+% which contains ERA5 SPEI-6 at each agricultural layer's harvest month
+% for years 1985-2022. Applies the same yield perturbation the Markov
+% chain uses for projection years (delta = droughtScaleFactor * SPEI6)
+% but driven by OBSERVED rather than SAMPLED SPEI. Years outside
+% 1985-2022 fall through to the GRMA baseline + projection-interpolation
+% logic above; the Markov chain block below (still gated by
+% droughtVariabilityOn) handles synthetic perturbations for 2023+.
+%
+% droughtScaleFactor is a calibration parameter (in mcParams) so the
+% calibration learns the SPEI -> yield -> migration coupling from
+% observed historical migration responses. The learned value carries
+% forward unchanged into the Markov-driven projection-period drought.
+
+obsSpeiFile = fullfile(grmaDataDir, 'observed_spei_harvest.csv');
+if exist(obsSpeiFile, 'file') && isfield(modelParameters, 'droughtScaleFactor')
+    OBS_FIRST_YEAR = 1985;
+    OBS_LAST_YEAR  = 2022;
+
+    OS = readtable(obsSpeiFile, 'TextType', 'string', 'VariableNamingRule', 'preserve');
+    obsRegionNames = string(OS{:, 1});
+
+    % Build location -> obs-CSV-row index using the same name field already
+    % resolved for the GRMA block above (locNamesGrma).
+    locToObsRow = zeros(nLoc, 1);
+    for iLoc = 1:nLoc
+        idx = find(obsRegionNames == locNamesGrma(iLoc), 1);
+        if ~isempty(idx)
+            locToObsRow(iLoc) = idx;
+        end
+    end
+    validObsLoc = locToObsRow > 0;
+
+    % For each ag layer with a grma_crop, look up its per-year observed
+    % SPEI column and apply the perturbation onto yieldFactor.
+    nObsLayers = 0;
+    for iL = grmaLayerIdx'
+        layerName = char(layerDefs.name(iL));
+        minYld    = double(layerDefs.drought_min_yield(iL));
+        if isnan(minYld); minYld = 0.0; end
+
+        anyYearApplied = false;
+        for yr = OBS_FIRST_YEAR:OBS_LAST_YEAR
+            iCyc = yr - firstYear + 1;
+            if iCyc < 1 || iCyc > nSimYears
+                continue;   % year outside this run's simulation window
+            end
+
+            colName = sprintf('%s_y%d', layerName, yr);
+            if ~ismember(colName, OS.Properties.VariableNames)
+                continue;   % no observed SPEI column for this layer-year
+            end
+            speiVals = OS.(colName);   % nObsRows x 1
+
+            speiPerLoc = zeros(nLoc, 1);
+            speiPerLoc(validObsLoc) = speiVals(locToObsRow(validObsLoc));
+
+            currYF = yieldFactor(:, iL, iCyc);
+            currYF = currYF + modelParameters.droughtScaleFactor * speiPerLoc;
+            currYF = max(minYld, min(1.0, currYF));
+            yieldFactor(:, iL, iCyc) = currYF;
+            anyYearApplied = true;
+        end
+        if anyYearApplied
+            nObsLayers = nObsLayers + 1;
+        end
+    end
+
+    fprintf(['createUtilityLayers: observed SPEI drought applied to %d ' ...
+             'layer(s) for years %d-%d (droughtScaleFactor = %.3f).\n'], ...
+             nObsLayers, OBS_FIRST_YEAR, OBS_LAST_YEAR, modelParameters.droughtScaleFactor);
+else
+    if ~exist(obsSpeiFile, 'file')
+        fprintf('createUtilityLayers: observed_spei_harvest.csv not found at %s -- skipping observed-drought perturbation.\n', ...
+                obsSpeiFile);
+    end
+end
+
 % --- Inter-annual drought variability (Markov chain) ----------------------
 % When modelParameters.droughtVariabilityOn == true, each agricultural
 % layer's yield factor is perturbed year-by-year using a region-specific
