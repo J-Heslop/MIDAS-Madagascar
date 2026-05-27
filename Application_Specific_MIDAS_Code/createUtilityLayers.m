@@ -1,273 +1,637 @@
-function [ utilityLayerFunctions, utilityHistory, utilityAccessCosts, utilityTimeConstraints, utilityDuration, utilityAccessCodesMat, utilityPrereqs, utilityBaseLayers, utilityForms, incomeForms, nExpected, hardSlotCountYN ] = createUtilityLayers(locations, modelParameters, demographicVariables )
-%createUtilityLayers defines the different income/utility layers (and the
-%functions that generate them)
-
-%utility layers are described in this model by:
-% 
-% i) a function used to generate a utility value, utilityLayerFunctions
-% ii) a set of particular codes corresponding to access requirements to use 
-% this layer, utilityAccessCodesMat
-% iii) a vector of costs associated with each of those codes,
-% utilityAccessCosts, and
-% iv) a time constraint explaining the fraction of an agent's time consumed 
-% by accessing that particular layer, utilityTimeConstraints
-
-% additionally, the estimation of utility is likely to require in most
-% applications:
+function [ utilityLayerFunctions, utilityHistory, utilityAccessCosts, utilityTimeConstraints, utilityDuration, utilityAccessCodesMat, utilityPrereqs, utilityBaseLayers, utilityForms, incomeForms, nExpected, hardSlotCountYN, localOnly ] = createUtilityLayers(locations, modelParameters, demographicVariables )
+%createUtilityLayers builds all utility layer arrays from a CSV definition file.
 %
-% v) a 'base' trajectory for each utility layer over time, that is modified
-% by the utility function, utilityBaseLayers
-% vi) a stored value of the realized utility value at each point in time
-% and space, utilityHistory
-% vii) a relationship matrix describing which layers must previously have
-% been accessed in order to access a layer, utilityPrereqs
-% viii) an identification of the expected occupancy of the layer for which
-% utility levels are defined, nExpected
-% ix) a flag for whether the expected number can be exceeded or not,
-% hardSlotCountYN
-% x) a flag differentiating the form of utility generated (against which
-% agents may have heterogeneous preferences), utilityForm
-% xi) a binary version of the above identifying income as a utility form
+% The CSV path is set by modelParameters.utilityLayersFile.
+% Each row in the CSV defines one utility layer. See Data/utility_layers_v1.csv
+% for column definitions and an example configuration.
+%
+% To switch utility configurations, change modelParameters.utilityLayersFile
+% in readParameters.m - no changes to this file are needed.
 
-%all of these variables are generated here.
+%% -----------------------------------------------------------------------
+%% 1. READ LAYER DEFINITIONS FROM CSV
+%% -----------------------------------------------------------------------
 
-mean_utility_by_layer = [10; ... %unskilled 1
-    20; ... %unskilled 2
-    30; ... %skilled
-    10; ... %ag 1
-    20; ... %ag 2
-    0; ... %school
-];
+layerDefs = readtable(modelParameters.utilityLayersFile, 'TextType', 'string');
+nLayers   = height(layerDefs);
+nLoc      = size(locations, 1);
+leadTime  = modelParameters.spinupTime;
+timeSteps = modelParameters.numCycles * modelParameters.cycleLength;
 
-
-%%%%%%%%%%%%%%%%%%%%%%%
-%%utilityLayerFunctions
-%%%%%%%%%%%%%%%%%%%%%%%
-%in the sample below, individual layer functions are defined as anonymous functions
-%of x, y, t (timestep), and n (number of agents occupying the layer).  any
-%additional arguments can be fed by varargin.  the key constraint of the
-%anonymous function is that whatever is input must be executable in a
-%single line of code - if the structure for the layer is more complicated,
-%one must either export some of the calculation to an intermediate variable
-%that can be fed to a single-line version of the layer function OR revisit
-%this anonymous function structure.
-
-utilityLayerFunctions = [];
-for indexI = 1:(size(mean_utility_by_layer,1))  %16 (or 13) different sources, with 4 levels
-    utilityLayerFunctions{indexI,1} = @(k,m,nExpected,n_actual, base) base * (m * nExpected) / (max(1, n_actual - m * nExpected) * k + m * nExpected);   %some income layer - base layer input times density-dependent extinction
+% Build named index struct so layers can be referenced by name rather than
+% by magic numbers.  e.g. L.vanilla returns the integer column index for
+% the vanilla layer, which can then be used in utilityBaseLayers(:, L.vanilla, :)
+L = struct(); %#ok<NASGU>
+for iL = 1:nLayers
+    L.(char(layerDefs.name(iL))) = iL;
 end
 
-%%%%%%%%%%%%%%%%%%%%%%%
-%%utilityHistory
-%%%%%%%%%%%%%%%%%%%%%%%
-leadTime = modelParameters.spinupTime;
-timeSteps = modelParameters.numCycles * modelParameters.cycleLength; 
-utilityHistory = zeros(size(locations,1),size(utilityLayerFunctions,1),timeSteps+leadTime);
+%% -----------------------------------------------------------------------
+%% 2. UTILITY LAYER FUNCTIONS
+%% -----------------------------------------------------------------------
+% All layers use the same density-dependent function:
+%   utility = base * (m * nExpected) / ((n_actual - m*nExpected)*k + m*nExpected)
+% Income falls as more agents compete for the same layer.
 
-%%%%%%%%%%%%%%%%%%%%%%%
-%%utilityBaseLayers
-%%%%%%%%%%%%%%%%%%%%%%%
+utilityLayerFunctions = cell(nLayers, 1);
+for iL = 1:nLayers
+    utilityLayerFunctions{iL,1} = @(k,m,nExpected,n_actual,base) ...
+        base * (m * nExpected) / (max(1, n_actual - m * nExpected) * k + m * nExpected);
+end
 
-%utilityBaseLayers has dimensions of (location, activity, time)
+%% -----------------------------------------------------------------------
+%% 3. UTILITY HISTORY (pre-allocated; filled during simulation)
+%% -----------------------------------------------------------------------
 
+utilityHistory = zeros(nLoc, nLayers, timeSteps + leadTime);
 
-localOnly = [0; ... %unskilled 1
-    0; ... %unskilled 2
-    0; ... %skilled
-    1; ... %ag 1
-    1; ... %ag 2
-    0; ... %school
-];
+%% -----------------------------------------------------------------------
+%% 4. BASE LAYER PARAMETERS FROM TABLE
+%% -----------------------------------------------------------------------
 
-timeQs =[0.5 0.5 0.5 0.5; ... %unskilled 1
-    0.5 0.5 0.5 0.5; ... %unskilled 2
-    0.5 0.5 0.5 0.5; ... %skilled (initially 0.75)
-    0.0 0.5 0.5 0; ... %ag 1 
-    0.0 0.5 0.5 0; ... %ag 2 (initially 0.1)
-    0.75 0.75 0.75 0.75; ... %school
-];
+mean_utility_by_layer = layerDefs.mean_utility;
 
-incomeQs =[1 1 1 1; ... %unskilled 1
-    1 1 1 1; ... %unskilled 2
-    1 1 1 1; ... %skilled
-    0 0 0 1; ... %ag 1 %Initial 0 0 0 1
-    0 0 0 1; ... %ag 2 %Initial 0 0 0 1
-    0 0 0 0];  %school
+% Apply the urban income multiplier (calibration scaffold).
+% Scales mean_utility for every non-agricultural (localOnly == 0) layer to
+% calibrate the urban/rural relative payoff balance. See the parameter
+% definition in readParameters.m for rationale. Default 1.0 = no change.
+if isfield(modelParameters, 'urbanIncomeMultiplier')
+    urbanRows = (layerDefs.localOnly == 0);
+    mean_utility_by_layer(urbanRows) = ...
+        mean_utility_by_layer(urbanRows) * modelParameters.urbanIncomeMultiplier;
+end
 
-% N x 2 Matrix specifying the [minimum, maximum] number of cycles that each layer entails
-utilityDuration = [4 inf; %unskilled 1
-    8 inf; %unskilled 2
-    12 inf; %skilled
-    8 inf; %ag 1
-    16 inf; %ag 2
-    modelParameters.schoolLength modelParameters.schoolLength; %school
-    ];
+timeQs   = [layerDefs.timeQ1, layerDefs.timeQ2, layerDefs.timeQ3, layerDefs.timeQ4];
+incomeQs = [layerDefs.incomeQ1, layerDefs.incomeQ2, layerDefs.incomeQ3, layerDefs.incomeQ4];
 
-quarterShare = incomeQs ./ (sum(incomeQs,2));
+utilityDuration = [layerDefs.duration_min, layerDefs.duration_max];
+
+%% -----------------------------------------------------------------------
+%% 5. UTILITY BASE LAYERS  (locations x layers x time)
+%% -----------------------------------------------------------------------
+
+utilityBaseLayers = zeros(nLoc, nLayers, timeSteps + leadTime);
+
+% Quarterly share: how annual income is distributed across the 4 quarters.
+% Rows where income sums to zero (e.g. school) become NaN -> replace with 0.
+quarterShare = incomeQs ./ sum(incomeQs, 2);
 quarterShare(isnan(quarterShare)) = 0;
 
-utilityBaseLayers = ones(size(locations,1),size(utilityLayerFunctions,1),timeSteps);
+% --- GRMA drought yield modulation -------------------------------------
+% Agricultural layers with a grma_crop entry in utility_layers_v1.csv have
+% their base utility scaled each simulation year by a pre-computed yield
+% factor derived from GRMA crop-specific drought projections.
+%
+% Yield factors (0-1) encode mean drought loss from the GRMA Crop-specific
+% Drought Index (CsDI), which combines SPEI-6, aridity index, crop water
+% needs (FAO Kc/Ky), and WRI water stress.
+% Source: GRMA Madagascar (2026), AXA Climate / Artelia / BRGM.
+%
+% Files generated by generate_grma_yield_timeseries.py:
+%   Data/GRMA_yield_rice_SSP2.csv   (and SSP5 equivalent)
+%   Data/GRMA_yield_maize_SSP2.csv
+%   Data/GRMA_yield_cassava_SSP2.csv
+%
+% Format: rows = 22 ADM2 regions, columns = NAME_2, y1985, y1986 ... y2085
+%
+% Inter-annual variability (SPEI-based) is intentionally disabled here and
+% can be layered on top once calibration is complete.  The drought_k,
+% drought_min_yield and drought_harvest_month columns are retained in
+% utility_layers_v1.csv for that purpose.
 
-%Adjustment factor for creating spatial variation
-epsilon = 0.0; %proportion of total income that may vary across regions
-climate_epsilon = 0.0; %proportion of total income that may vary across years
-for indexK = 1:size(locations,1)
-    for indexI = 1:modelParameters.cycleLength:size(utilityBaseLayers,3)
-        %utilityBaseLayers(indexK,:,indexI) = mean_utility_by_layer;
-        for indexJ = 1:size(mean_utility_by_layer,1)
-            if 3 < indexJ < 6
-                utilityBaseLayers(indexK,indexJ,indexI:indexI + modelParameters.cycleLength -1) = mean_utility_by_layer(indexJ,1) * (1 + epsilon * (-1 + 2 * rand(1))) * (1 + climate_epsilon * (-1 + 2 * rand(1)));
-            else
-                utilityBaseLayers(indexK,indexJ,indexI:indexI + modelParameters.cycleLength -1) = mean_utility_by_layer(indexJ,1);
+nSimYears = timeSteps / modelParameters.cycleLength;
+firstYear = modelParameters.startYear;
+
+% yieldFactor(iLoc, iL, iCyc): default 1.0 (no drought effect)
+yieldFactor = ones(nLoc, nLayers, nSimYears);
+
+% Data directory (same folder as utility_layers_v1.csv)
+grmaDataDir = fileparts(modelParameters.utilityLayersFile);
+
+% Resolve which location-name field the locations table carries
+if ismember('source_NAME_2', locations.Properties.VariableNames)
+    locNamesGrma = string(locations.source_NAME_2);
+elseif ismember('source_ADM2_FR', locations.Properties.VariableNames)
+    locNamesGrma = string(locations.source_ADM2_FR);
+else
+    srcFlds = locations.Properties.VariableNames( ...
+        startsWith(locations.Properties.VariableNames, 'source_'));
+    locNamesGrma = string(locations.(srcFlds{1}));
+end
+
+% Identify layers that have a grma_crop assignment
+hasGrmaCol = ismember('grma_crop', layerDefs.Properties.VariableNames);
+grmaLayerIdx = [];
+if hasGrmaCol
+    grmaLayerIdx = find(~ismissing(layerDefs.grma_crop) & layerDefs.grma_crop ~= "");
+end
+
+if ~isempty(grmaLayerIdx)
+    % Load each unique crop file once and cache in a struct
+    grmaCache    = struct();
+    loadedCrops  = {};
+
+    for iL = grmaLayerIdx'
+        cropName = char(layerDefs.grma_crop(iL));
+        if ismember(cropName, loadedCrops)
+            continue;   % already loaded
+        end
+
+        % Build file path from crop name and SSP scenario (defined in utility_layers_v1.csv)
+        grmaPath = fullfile(grmaDataDir, ...
+            sprintf('GRMA_yield_%s_%s.csv', cropName, modelParameters.sspScenario));
+
+        if ~exist(grmaPath, 'file')
+            warning('createUtilityLayers: GRMA file not found: %s\n  Agricultural layer "%s" will run without drought modulation.', ...
+                grmaPath, char(layerDefs.name(iL)));
+            continue;
+        end
+
+        % Read file: col 1 = NAME_2, cols 2:end = y1985..y2085
+        T = readtable(grmaPath, 'TextType', 'string');
+        grmaCache.(cropName).regionNames = string(T{:, 1});
+        grmaCache.(cropName).yearData    = table2array(T(:, 2:end));  % [22 x 101]
+        grmaCache.(cropName).firstYear   = 1985;                      % fixed by script
+        loadedCrops{end+1} = cropName; %#ok<AGROW>
+    end
+
+    % Apply yield factors layer by layer
+    nGrmaApplied = 0;
+    for iL = grmaLayerIdx'
+        cropName = char(layerDefs.grma_crop(iL));
+        if ~isfield(grmaCache, cropName)
+            continue;   % file was missing or unrecognised
+        end
+        cd = grmaCache.(cropName);
+
+        % Build location → GRMA-row index for this crop
+        locToGrmaRow = zeros(nLoc, 1);
+        for iLoc = 1:nLoc
+            idx = find(cd.regionNames == locNamesGrma(iLoc), 1);
+            if ~isempty(idx)
+                locToGrmaRow(iLoc) = idx;
             end
         end
-        
-    end
-end
+        validLoc = locToGrmaRow > 0;
 
-for indexI = 1:size(utilityBaseLayers,1)
-    for indexJ = 1:size(utilityBaseLayers,2)
-        temp_2 = zeros(size(utilityBaseLayers,3),1);
-        for indexM = 1:modelParameters.cycleLength:size(utilityBaseLayers,3)
-            temp_2(indexM:indexM + modelParameters.cycleLength - 1) = utilityBaseLayers(indexI,indexJ,indexM) * quarterShare(indexJ,:);
+        for iCyc = 1:nSimYears
+            yr     = firstYear + iCyc - 1;
+            colIdx = yr - cd.firstYear + 1;   % column index into yearData
+
+            if colIdx < 1 || colIdx > size(cd.yearData, 2)
+                continue;   % year outside CSV range: leave factor = 1.0
+            end
+
+            % Gather pre-computed yield factors for all locations
+            factor = ones(nLoc, 1);
+            factor(validLoc) = cd.yearData(locToGrmaRow(validLoc), colIdx);
+
+            % Guard against any NaN/negative values from file
+            factor(isnan(factor) | factor < 0) = 1.0;
+            factor = min(factor, 1.0);
+
+            yieldFactor(:, iL, iCyc) = factor;
         end
-        utilityBaseLayers(indexI,indexJ,:) = temp_2;
+        nGrmaApplied = nGrmaApplied + 1;
+    end
+
+    fprintf('createUtilityLayers: GRMA yield modulation applied to %d layer(s) [%s scenario].\n', ...
+        nGrmaApplied, modelParameters.sspScenario);
+end
+
+% --- Observed historical drought modulation (calibration period only) ----
+% Loads Data/observed_spei_harvest.csv (produced by apply_observed_drought.py)
+% which contains ERA5 SPEI-6 at each agricultural layer's harvest month
+% for years 1985-2022. Applies the same yield perturbation the Markov
+% chain uses for projection years (delta = droughtScaleFactor * SPEI6)
+% but driven by OBSERVED rather than SAMPLED SPEI. Years outside
+% 1985-2022 fall through to the GRMA baseline + projection-interpolation
+% logic above; the Markov chain block below (still gated by
+% droughtVariabilityOn) handles synthetic perturbations for 2023+.
+%
+% droughtScaleFactor is a calibration parameter (in mcParams) so the
+% calibration learns the SPEI -> yield -> migration coupling from
+% observed historical migration responses. The learned value carries
+% forward unchanged into the Markov-driven projection-period drought.
+
+obsSpeiFile = fullfile(grmaDataDir, 'observed_spei_harvest.csv');
+if exist(obsSpeiFile, 'file') && isfield(modelParameters, 'droughtScaleFactor')
+    OBS_FIRST_YEAR = 1985;
+    OBS_LAST_YEAR  = 2022;
+
+    OS = readtable(obsSpeiFile, 'TextType', 'string', 'VariableNamingRule', 'preserve');
+    obsRegionNames = string(OS{:, 1});
+
+    % Build location -> obs-CSV-row index using the same name field already
+    % resolved for the GRMA block above (locNamesGrma).
+    locToObsRow = zeros(nLoc, 1);
+    for iLoc = 1:nLoc
+        idx = find(obsRegionNames == locNamesGrma(iLoc), 1);
+        if ~isempty(idx)
+            locToObsRow(iLoc) = idx;
+        end
+    end
+    validObsLoc = locToObsRow > 0;
+
+    % For each ag layer with a grma_crop, look up its per-year observed
+    % SPEI column and apply the perturbation onto yieldFactor.
+    nObsLayers = 0;
+    for iL = grmaLayerIdx'
+        layerName = char(layerDefs.name(iL));
+        minYld    = double(layerDefs.drought_min_yield(iL));
+        if isnan(minYld); minYld = 0.0; end
+
+        anyYearApplied = false;
+        for yr = OBS_FIRST_YEAR:OBS_LAST_YEAR
+            iCyc = yr - firstYear + 1;
+            if iCyc < 1 || iCyc > nSimYears
+                continue;   % year outside this run's simulation window
+            end
+
+            colName = sprintf('%s_y%d', layerName, yr);
+            if ~ismember(colName, OS.Properties.VariableNames)
+                continue;   % no observed SPEI column for this layer-year
+            end
+            speiVals = OS.(colName);   % nObsRows x 1
+
+            speiPerLoc = zeros(nLoc, 1);
+            speiPerLoc(validObsLoc) = speiVals(locToObsRow(validObsLoc));
+
+            currYF = yieldFactor(:, iL, iCyc);
+            currYF = currYF + modelParameters.droughtScaleFactor * speiPerLoc;
+            currYF = max(minYld, min(1.0, currYF));
+            yieldFactor(:, iL, iCyc) = currYF;
+            anyYearApplied = true;
+        end
+        if anyYearApplied
+            nObsLayers = nObsLayers + 1;
+        end
+    end
+
+    fprintf(['createUtilityLayers: observed SPEI drought applied to %d ' ...
+             'layer(s) for years %d-%d (droughtScaleFactor = %.3f).\n'], ...
+             nObsLayers, OBS_FIRST_YEAR, OBS_LAST_YEAR, modelParameters.droughtScaleFactor);
+else
+    if ~exist(obsSpeiFile, 'file')
+        fprintf('createUtilityLayers: observed_spei_harvest.csv not found at %s -- skipping observed-drought perturbation.\n', ...
+                obsSpeiFile);
     end
 end
 
-%now add some lead time for agents to learn before time actually starts
-%moving
-utilityBaseLayers(:,:,leadTime+1:leadTime+timeSteps) = utilityBaseLayers;
-for indexI = leadTime:-1:1
-   utilityBaseLayers(:,:,indexI) = utilityBaseLayers(:,:,indexI+modelParameters.cycleLength); 
+% --- Inter-annual drought variability (Markov chain) ----------------------
+% When modelParameters.droughtVariabilityOn == true, each agricultural
+% layer's yield factor is perturbed year-by-year using a region-specific
+% two-state (drought / normal) Markov chain driven by observed SPEI6
+% climatology.
+%
+% Parameters are read from drought_markov_params.csv (one row per
+% region × layer).  Each region starts in a drought/normal state drawn
+% from its stationary distribution (pi_D), then transitions are simulated
+% forward.  In drought years a SPEI6 value is sampled from N(mu_d, sd_d)
+% and the perturbation applied is:
+%
+%   delta = droughtScaleFactor * SPEI6_sample   (negative; subtracts from yield)
+%   yieldFactor(loc, layer, year) = clip(yieldFactor + delta, 0, 1)
+%
+% Normal years carry no perturbation (perturbation = 0).
+%
+% Tune modelParameters.droughtScaleFactor to control magnitude.
+% Keep droughtVariabilityOn = false during calibration.
+
+if isfield(modelParameters, 'droughtVariabilityOn') && modelParameters.droughtVariabilityOn
+
+    markovFile = modelParameters.droughtMarkovFile;
+    scaleFac   = modelParameters.droughtScaleFactor;
+
+    if ~exist(markovFile, 'file')
+        warning('createUtilityLayers: droughtMarkovFile not found: %s\n  Inter-annual variability skipped.', markovFile);
+    elseif isempty(grmaLayerIdx)
+        warning('createUtilityLayers: droughtVariabilityOn=true but no GRMA crop layers found. Skipped.');
+    else
+        % Load Markov parameter table
+        MP = readtable(markovFile, 'TextType', 'string');
+
+        % ----------------------------------------------------------------
+        % STEP 1: Pre-generate drought state sequence (nLoc x nSimYears)
+        % using one shared spatial correlation matrix (average across crop
+        % layers).  All layers within the same region share the same
+        % drought/normal state sequence — only the yield perturbation
+        % magnitude varies by layer (different harvest month distributions
+        % and Ky values).  This ensures a drought year for rice coincides
+        % with a drought year for cassava in the same region.
+        % ----------------------------------------------------------------
+
+        % Use the rice_south (representative) layer to extract p_DD/p_ND/pi_D
+        % for the shared state simulation — these are nearly identical across
+        % layers for the same region.
+        refLayer   = 'rice_south';
+        refRows    = MP(MP.layer == refLayer, :);
+
+        p_DD_vec  = zeros(nLoc, 1);
+        p_ND_vec  = zeros(nLoc, 1);
+        pi_D_vec  = zeros(nLoc, 1);
+        hasParams = false(nLoc, 1);
+
+        for iLoc = 1:nLoc
+            rowIdx = find(refRows.region == locNamesGrma(iLoc), 1);
+            if ~isempty(rowIdx)
+                p_DD_vec(iLoc)  = refRows.p_DD(rowIdx);
+                p_ND_vec(iLoc)  = refRows.p_ND(rowIdx);
+                pi_D_vec(iLoc)  = refRows.pi_D(rowIdx);
+                hasParams(iLoc) = true;
+            end
+        end
+
+        % Load shared spatial correlation matrix
+        sharedCorrFile = fullfile(grmaDataDir, 'spei6_corr_shared.csv');
+        useCorr = false;
+        if exist(sharedCorrFile, 'file')
+            CT          = readtable(sharedCorrFile, 'ReadRowNames', true, 'TextType', 'string');
+            corrRegions = string(CT.Properties.RowNames);
+
+            locToCorrRow = zeros(nLoc, 1);
+            for iLoc = 1:nLoc
+                idx = find(corrRegions == locNamesGrma(iLoc), 1);
+                if ~isempty(idx); locToCorrRow(iLoc) = idx; end
+            end
+
+            validIdx = find(hasParams & locToCorrRow > 0);
+            nValid   = numel(validIdx);
+
+            if nValid > 1
+                corrRows = locToCorrRow(validIdx);
+                R = table2array(CT(corrRows, corrRows));
+                R = (R + R') / 2;
+                minEig = min(eig(R));
+                if minEig < 1e-8
+                    R = R + (abs(minEig) + 1e-6) * eye(nValid);
+                end
+                try
+                    cholL   = chol(R, 'lower');
+                    useCorr = true;
+                catch
+                    warning('createUtilityLayers: Cholesky failed for shared correlation matrix. Using independent transitions.');
+                end
+            end
+        else
+            warning('createUtilityLayers: spei6_corr_shared.csv not found. Using independent regional transitions.');
+        end
+
+        % Initialise states from stationary distribution
+        droughtStates = zeros(nLoc, nSimYears);   % 1 = drought, 0 = normal
+        if useCorr
+            z0 = cholL * randn(nValid, 1);
+            state_vec = zeros(nLoc, 1);
+            state_vec(validIdx) = double(normcdf(z0) < pi_D_vec(validIdx));
+        else
+            state_vec = zeros(nLoc, 1);
+            state_vec(hasParams) = double(rand(sum(hasParams), 1) < pi_D_vec(hasParams));
+        end
+
+        % Simulate Markov chain forward — one shared sequence for all layers
+        for iCyc = 1:nSimYears
+            if useCorr
+                u_all = normcdf(cholL * randn(nValid, 1));
+            else
+                u_all = rand(sum(hasParams), 1);
+            end
+            locsToUpdate = validIdx;   % or find(hasParams) if !useCorr
+
+            for k = 1:numel(locsToUpdate)
+                iLoc = locsToUpdate(k);
+                if state_vec(iLoc) == 1
+                    state_vec(iLoc) = double(u_all(k) < p_DD_vec(iLoc));
+                else
+                    state_vec(iLoc) = double(u_all(k) < p_ND_vec(iLoc));
+                end
+            end
+            droughtStates(:, iCyc) = state_vec;
+        end
+
+        % ----------------------------------------------------------------
+        % STEP 2: Apply layer-specific yield perturbations using the
+        % shared drought state sequence.  Each layer has its own SPEI6
+        % distribution (harvest month, Ky) so magnitude varies by layer.
+        % ----------------------------------------------------------------
+
+        nMarkovApplied = 0;
+        for iL = grmaLayerIdx'
+            layerName = char(layerDefs.name(iL));
+            layerRows = MP(MP.layer == layerName, :);
+            if isempty(layerRows)
+                warning('createUtilityLayers: no Markov params for layer "%s". Skipping.', layerName);
+                continue;
+            end
+
+            % Build per-location SPEI6 distribution vectors for this layer
+            mu_d_vec = zeros(nLoc, 1);
+            sd_d_vec = ones(nLoc, 1);
+
+            for iLoc = 1:nLoc
+                rowIdx = find(layerRows.region == locNamesGrma(iLoc), 1);
+                if ~isempty(rowIdx)
+                    mu_d_vec(iLoc) = layerRows.drought_spei_mean(rowIdx);
+                    sd_d_vec(iLoc) = layerRows.drought_spei_std(rowIdx);
+                end
+            end
+
+            % Apply perturbations: drought state is shared, magnitude is layer-specific
+            for iCyc = 1:nSimYears
+                for iLoc = 1:nLoc
+                    if ~hasParams(iLoc); continue; end
+                    if droughtStates(iLoc, iCyc) == 1
+                        spei6_sample = mu_d_vec(iLoc) + sd_d_vec(iLoc) * randn();
+                        delta = scaleFac * spei6_sample;   % SPEI6 negative in drought → negative delta
+                    else
+                        delta = 0;
+                    end
+                    yieldFactor(iLoc, iL, iCyc) = ...
+                        min(1.0, max(0.0, yieldFactor(iLoc, iL, iCyc) + delta));
+                end
+            end
+            nMarkovApplied = nMarkovApplied + 1;
+        end
+
+        fprintf(['createUtilityLayers: drought Markov variability applied to %d layer(s) ' ...
+                 '[scaleFactor=%.3f, spatialCorr=%d, sharedState=true].\n'], ...
+                 nMarkovApplied, scaleFac, useCorr);
+    end
 end
 
-%%%%%%%%%%%%%%%%%%%%%%%
-%%utilityAccessCosts and utilityAccessCodesMat
-%%%%%%%%%%%%%%%%%%%%%%%
-%define the cost of access for utility layers ... payments may provide
-%access to different locations (i.e., a license within a state or country)
-%or to different layers (i.e., training and certification in related
-%fields, or capital investment in related tools, etc.)  
+% --- Fill simulation period (after spinup), applying drought factors ---
+for iL = 1:nLayers
+    for iCyc = 1:nSimYears
+        tStart = leadTime + (iCyc - 1) * modelParameters.cycleLength + 1;
+        for iQ = 1:modelParameters.cycleLength
+            utilityBaseLayers(:, iL, tStart + iQ - 1) = ...
+                mean_utility_by_layer(iL) * quarterShare(iL, iQ) ...
+                .* yieldFactor(:, iL, iCyc);
+        end
+    end
+end
 
-%utilityAccessCosts Dimensions: n x 2, where n is the number of different costs, and the 2
-%columns are for the ID and the value
+% Fill the spinup period by repeating the first cycle backwards in time.
+for iT = leadTime:-1:1
+    utilityBaseLayers(:,:,iT) = utilityBaseLayers(:,:,iT + modelParameters.cycleLength);
+end
 
-%utilityAccessCodesMat Dimensions: n x m x k, where n is the number of different costs, m is the
-%number of different utility layers, and k is the number of locations
+% --- Spatial restrictions ---
+% Layers with restrict_to ~= 'ALL' are zeroed out for all excluded regions.
+% Uses NAME_2 (district name) from the locations table.
+% Multiple regions are pipe-separated in the CSV, e.g. 'Sava|Analanjirofo'.
+% Spelling must match the shapefile NAME_2 field exactly.
+% Determine which location name field to use for spatial restrictions.
+% Prefer source_NAME_2 (requires regenerating the map .mat after levelName
+% was set to 'NAME_' in readParameters.m).  Fall back to source_ADM2_FR
+% (always present in the shapefile).  Restrict-to values in the CSV must
+% match the chosen field's values exactly.
+if ismember('source_NAME_2', locations.Properties.VariableNames)
+    locNameField = 'source_NAME_2';
+elseif ismember('source_ADM2_FR', locations.Properties.VariableNames)
+    locNameField = 'source_ADM2_FR';
+elseif ismember('source_ADM1_FR', locations.Properties.VariableNames)
+    locNameField = 'source_ADM1_FR';
+else
+    % Last resort — use whatever the first source_ field is
+    srcFields = locations.Properties.VariableNames( ...
+        startsWith(locations.Properties.VariableNames, 'source_'));
+    locNameField = srcFields{1};
+    warning('createUtilityLayers: could not find a region name field. Using %s for spatial restrictions.', locNameField);
+end
 
-utilityAccessCosts = [ ...
-    1 modelParameters.smallFarmCost; %cost of buying small farm %original 1000
-    2 modelParameters.largeFarmCost; %cost of growing to a large farm %original 4000
-    6 modelParameters.educationCost; %cost of going to school %original 5000
-    ];
+locNameVec = string(locations.(locNameField));
 
-utilityAccessCodesMat = zeros(size(utilityAccessCosts,1), size(mean_utility_by_layer,1), size(locations,1));
-utilityAccessCodesMat(1,4,:) = 1;
-utilityAccessCodesMat(2,5,:) = 1;
-utilityAccessCodesMat(3,6,:) = 1;
+% spatiallyRestricted(loc, layer) = true means that loc is OUTSIDE the
+% allowed region for that layer.  Used later to enforce hard-slot blocking.
+spatiallyRestricted = false(nLoc, nLayers);
 
-%%%%%%%%%%%%%%%%%
-%nExpected
-%%%%%%%%%%%%%%%%%
-%in some way, estimate the number of agents you expect to be occupying a
-%particular slot, as well as whether there are a fixed number of slots
-%(i.e., jobs) or not (i.e., free entry to that layer).  By default these
-%are all set to 0
+restrictTo = layerDefs.restrict_to;
+for iL = 1:nLayers
+    if restrictTo(iL) ~= "ALL"
+        regions = strsplit(restrictTo(iL), '|');
+        allowedRows = ismember(locNameVec, regions);
+        if ~any(allowedRows)
+            warning('createUtilityLayers: layer "%s" restrict_to="%s" matched 0 locations in field "%s". Layer will be unavailable everywhere. Check spelling.', ...
+                char(layerDefs.name(iL)), char(restrictTo(iL)), locNameField);
+        end
+        % Zero the base utility so income from this layer is 0 here
+        utilityBaseLayers(~allowedRows, iL, :) = 0;
+        % Record which loc/layer combinations are restricted
+        spatiallyRestricted(~allowedRows, iL) = true;
+    end
+end
 
-locationProb = demographicVariables.locationLikelihood;
+%% -----------------------------------------------------------------------
+%% 6. ACCESS COSTS
+%% -----------------------------------------------------------------------
+% access_cost_param in the CSV names a field in modelParameters
+% (e.g. 'smallFarmCost', 'largeFarmCost', 'educationCost').
+% Leave blank for layers with free entry.
+
+accessCostParams = fillmissing(layerDefs.access_cost_param,'constant',"");
+uniqueParams     = unique(accessCostParams(accessCostParams ~= ""));
+nCostTypes       = length(uniqueParams);
+
+if nCostTypes > 0
+    utilityAccessCosts = zeros(nCostTypes, 2);
+    for iC = 1:nCostTypes
+        utilityAccessCosts(iC, 1) = iC;
+        utilityAccessCosts(iC, 2) = modelParameters.(char(uniqueParams(iC)));
+    end
+
+    utilityAccessCodesMat = zeros(nCostTypes, nLayers, nLoc);
+    for iL = 1:nLayers
+        if accessCostParams(iL) ~= ""
+            costIdx = find(uniqueParams == accessCostParams(iL));
+            utilityAccessCodesMat(costIdx, iL, :) = 1;
+        end
+    end
+else
+    utilityAccessCosts    = zeros(0, 2);
+    utilityAccessCodesMat = zeros(0, nLayers, nLoc);
+end
+
+%% -----------------------------------------------------------------------
+%% 7. EXPECTED OCCUPANCY AND HARD SLOTS
+%% -----------------------------------------------------------------------
+
+locationProb        = demographicVariables.locationLikelihood;
 locationProb(2:end) = locationProb(2:end) - locationProb(1:end-1);
-numAgentsModel = locationProb * modelParameters.numAgents;
+numAgentsModel      = locationProb * modelParameters.numAgents;
 
-%utility_layers_prop gives the proportion of agents who would occupy each
-%layer, so this one is a simple multiplication.  first 15 of 30 layers are
-%'jobs' with fixed slots available, last 15 of 30 are small enterprises
-%without fixed slots
+nExpected = zeros(nLoc, nLayers);
+for iL = 1:nLayers
+    nExpected(:, iL) = floor(numAgentsModel * layerDefs.nExpected_frac(iL));
+end
 
-nExpected =  zeros(size(locations,1),size(mean_utility_by_layer,1));
+hardSlotCountYN = false(nLoc, nLayers);
+for iL = 1:nLayers
+    if layerDefs.hard_slot(iL)
+        hardSlotCountYN(:, iL) = true;
+    end
+end
 
-%let initial occupation be about 40% in unskilled 1, 15% in unskilled 2,
-%and 5% in skilled; 40% in ag 1, 20% in ag 2, and 10% in school.
-nExpected(:,1) = floor(numAgentsModel * 0.4); 
-nExpected(:,2) = floor(numAgentsModel * 0.15); 
-nExpected(:,3) = floor(numAgentsModel * 0.05);
-nExpected(:,4) = floor(numAgentsModel * 0.4);
-nExpected(:,5) = floor(numAgentsModel * 0.2);
-nExpected(:,6) = floor(numAgentsModel * 0.1);
+% Enforce spatial restrictions using the MIDAS hard-slot mechanism.
+% Setting nExpected = 0 and hardSlotCountYN = true for restricted
+% location/layer pairs means hasOpenSlots = false there, which causes
+% choosePortfolio.m to actively strip those layers from any portfolio:
+%   bestPortfolio(1,1:end-2) = hasOpenSlots(loc,:) & bestPortfolio(1,1:end-2)
+% This is necessary because the backcasting algorithm in createPortfolio.m
+% selects layers randomly without checking utility, so zeroing
+% utilityBaseLayers alone is not enough to prevent occupation.
+nExpected(spatiallyRestricted)      = 0;
+hardSlotCountYN(spatiallyRestricted) = true;
 
-hardSlotCountYN = false(size(nExpected));
-hardSlotCountYN(:,3) = false;  %skilled labor opportunities represent fixed job opportunities
-hardSlotCountYN(:,6) = false;  %schools have fixed numbers of seats available
+%% -----------------------------------------------------------------------
+%% 8. UTILITY FORMS
+%% -----------------------------------------------------------------------
+% 1 = income (default for all layers).  Other values correspond to
+% elements in the agent's B-list for heterogeneous preferences.
 
-%utility layers may be income, use value, etc.  identify what form of
-%utility it is, so that they get added and weighted appropriately in
-%calculation.  BY DEFAULT, '1' is income.  THE NUMBER IN UTILITY FORMS
-%CORRESPONDS WITH THE ELEMENT IN THE AGENT'S B LIST.
-utilityForms = zeros(length(utilityLayerFunctions),1);
+utilityForms = layerDefs.utility_form;
+incomeForms  = utilityForms == 1;
 
-%Utility form values correspond to the list of utility coefficients in
-%agent utility functions (i.e., numbered 1 to n) ... in null case, all are
-%income (same coefficient)
-utilityForms(1:length(utilityLayerFunctions)) = 1;
+%% -----------------------------------------------------------------------
+%% 9. TIME CONSTRAINTS
+%% -----------------------------------------------------------------------
 
-%Income form is either 0 or 1 (with 1 meaning income)
-incomeForms = utilityForms == 1;
+utilityTimeConstraints = [(1:nLayers)', timeQs];
 
+%% -----------------------------------------------------------------------
+%% 10. PREREQUISITES
+%% -----------------------------------------------------------------------
+% prereq column holds the name of a required layer, or is empty.
+% Convention: utilityPrereqs(this_layer, required_layer) = 1
 
-%utilityTimeConstraints: n x (k+1) where n is number of layers and k number of periods in cycle
-% specify the fraction of time for each period in a cycle that a layer
-%consumes (this example using a year with 4 periods)
-%utilityTimeConstraints = ...
-%    [1 0.5 0.25 0.25 0.5; %accessing layer 1 is a 25% FTE commitment
-%    2 0.5 0.25 0.25 0.5; %accessing layer 2 is a 50% FTE commitment
-%    3 0.5 0.75 0.75 0]; %accessing layer 3 is a 50% FTE commitment
+utilityPrereqs = zeros(nLayers, nLayers);
+prereqCol = fillmissing(layerDefs.prereq,'constant',"");
+for iL = 1:nLayers
+    if prereqCol(iL) ~= ""
+        prereqIdx = L.(char(prereqCol(iL)));
+        utilityPrereqs(iL, prereqIdx) = 1;
+    end
+end
 
-utilityTimeConstraints = [(1:size(timeQs,1))' timeQs];
+% Each layer implicitly requires itself (MIDAS convention).
+utilityPrereqs = utilityPrereqs + eye(nLayers);
 
-%define linkages between layers (such as where different layers represent
-%progressive investment in a particular line of utility (e.g., farmland)
-utilityPrereqs = zeros(size(utilityTimeConstraints,1));
-
-%for now, no prereqs, but can apply the below code if we want to link 1st
-%through 5th (for example) layers in farming, livestock, etc., to capture
-%the idea of simply growing the enterprise
-
-%let the 2nd Quartile require the 1st, the 3rd require 2nd and 1st, and 4th
-%require 1st, 2nd, and 3rd for every layer source
-% for indexI = 4:4:size(utilityTimeConstraints,1)
-%    utilityPrereqs(indexI, indexI-3:indexI-1) = 1; 
-%    utilityPrereqs(indexI-1, indexI-3:indexI-2) = 1; 
-%    utilityPrereqs(indexI-2, indexI-3) = 1; 
-% end
-
-%in the form utilityPrereqs('this layer' , 'requires this layer') = 1;
-utilityPrereqs(2, 1) = 1; %unskilled 2 requires unskilled 1
-utilityPrereqs(5, 4) = 1; %ag 2 requires ag 1
-utilityPrereqs(3, 6) = 1; %skilled labor requires school
-
-
-
-%each layer 'requires' itself
-utilityPrereqs = utilityPrereqs + eye(size(utilityTimeConstraints,1));
-utilityPrereqs = sparse(utilityPrereqs);
-
-%with these linkages in place, need to account for the fact that in the
-%model, any agent occupying Q4 of something will automatically occupy Q1,
-%Q2, Q3, but at present the values nExpected don't account for this.  Thus,
-%nExpected for Q1 needs to add in Q2-4, for Q2 needs to add in Q3-4, etc.
-%More generally, all 'expected' values need to be adjusted up to allow for
-%all things that rely on them.  This is because of a difference between how
-%the model interprets layers (occupying Q4 means occupying Q4 + all
-%pre-requisites) and the input data (occupying Q4 means only occupying Q4)
+% Adjust nExpected upward to account for prerequisite chains:
+% an agent occupying layer X is also counted against all X's prerequisites.
 tempExpected = zeros(size(nExpected));
-
-for indexI = 1:size(nExpected,2)
-   tempExpected(:,indexI) = sum(nExpected(:,utilityPrereqs(:,indexI) > 0),2); 
+for iL = 1:nLayers
+    tempExpected(:, iL) = sum(nExpected(:, utilityPrereqs(:, iL) > 0), 2);
 end
 nExpected = tempExpected;
 
+utilityPrereqs = sparse(utilityPrereqs);
 
+%% -----------------------------------------------------------------------
+%% 11. LOCAL-ONLY FLAGS (agricultural / location-tied layers)
+%% -----------------------------------------------------------------------
+% localOnly(i) = 1 means layer i is tied to the agent's current location
+% (i.e., agricultural layers). Used for food insecurity tracking in
+% midasMainLoop.m and for urban/rural calibration in buildNextRound.m.
 
+localOnly = logical(layerDefs.localOnly);
 
-%%% OTHER EXAMPLE CODE BELOW HERE
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+end

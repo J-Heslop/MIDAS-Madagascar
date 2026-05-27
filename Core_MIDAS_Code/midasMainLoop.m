@@ -28,6 +28,13 @@ migrationMatrix = zeros(numLocations,numLocations,modelParameters.timeSteps);
 portfolioHistory = cell(numLocations, modelParameters.timeSteps);
 trappedHistory = zeros(length(agentList),modelParameters.timeSteps);
 aspirationHistory = zeros(numLayers, modelParameters.timeSteps);
+% Food insecurity tracker: counts agents whose net income fell below subsistence_costs
+% Rows = locations, cols = timesteps. Separate counts for ag and all agents.
+agLayerIdx = find(utilityVariables.localOnly);  % indices of agricultural (local-only) layers
+foodInsecureCount_ag  = zeros(numLocations, modelParameters.timeSteps);
+foodInsecureCount_all = zeros(numLocations, modelParameters.timeSteps);
+agentCount_ag         = zeros(numLocations, modelParameters.timeSteps);
+agentCount_all        = zeros(numLocations, modelParameters.timeSteps);
 %wealthHistory = zeros(modelParameters.numAgents,modelParameters.timeSteps);
 
 %create a list of shared layers, for use in choosing new link
@@ -38,7 +45,15 @@ agentLocations = ones(1,length(agentList));
 agentLocations(aliveList) = [agentList(aliveList).matrixLocation];
 
 for indexT = 1:modelParameters.timeSteps
-    
+
+    % Compute current calendar year and demographic array index.
+    % During spinup (indexT <= spinupTime) the model uses startYear demographics.
+    % After spinup, currentYear advances at 1/cycleLength years per timestep.
+    currentYear = modelParameters.startYear + ...
+        max(0, indexT - modelParameters.spinupTime) / modelParameters.cycleLength;
+    tIdx = min( max(1, round(currentYear) - modelParameters.startYear + 1), ...
+                size(demographicVariables.survivalRate, 4) );
+
     %update the social network links ... cap any that swelled above 1 in
     %the last loop, and allow all to decay to no less than 0
     mapVariables.network(mapVariables.network ~= 0) = min(1,mapVariables.network(mapVariables.network ~= 0));
@@ -59,7 +74,7 @@ for indexT = 1:modelParameters.timeSteps
         currentAgent.age = currentAgent.age + modelParameters.cyclesPerTimeStep;
 
         %draw number to see if agent survives to this timestep
-        agentSurvives = rand() < interp1([demographicVariables.agePointsSurvival], [demographicVariables.survivalRate(currentAgent.matrixLocation,:,currentAgent.gender)], currentAgent.age);
+        agentSurvives = rand() < interp1([demographicVariables.agePointsSurvival], [demographicVariables.survivalRate(currentAgent.matrixLocation,:,currentAgent.gender,tIdx)], currentAgent.age);
 
         if(~agentSurvives)
 
@@ -92,7 +107,7 @@ for indexT = 1:modelParameters.timeSteps
  
         %draw number to see if (for female agents) agent gives birth
         if(currentAgent.gender == 2 && currentAgent.age >= modelParameters.ageDecision)
-            agentGivesBirth = rand() < interp1(demographicVariables.agePointsFertility, demographicVariables.fertilityRate(currentAgent.matrixLocation,:), currentAgent.age);
+            agentGivesBirth = rand() < interp1(demographicVariables.agePointsFertility, demographicVariables.fertilityRate(currentAgent.matrixLocation,:,tIdx), currentAgent.age);
             if(agentGivesBirth)
                 gender = 2 - (rand() > 0.5);  %let it be equally likely to be 1 or 2
                 age = 0;
@@ -332,8 +347,30 @@ for indexT = 1:modelParameters.timeSteps
                     
                 end
             end
-            currentAgent.wealth = currentAgent.wealth + newIncome - sum(actualPayments);
+            netIncome = newIncome - sum(actualPayments);
+            currentAgent.wealth = currentAgent.wealth + netIncome - agentParameters.subsistence_costs;
             currentAgent.wealthHistory{indexT} = currentAgent.wealth;
+
+            % --- Food insecurity tracking ---
+            % currentPortfolio is a logical row vector of length numLayers
+            % (set at line 296), and agLayerIdx is an integer index list
+            % of ag (location-tied) layers. The agent is an "ag agent" if
+            % any of its true entries fall at an ag-layer position.
+            % NB: an earlier version of this used ismember(currentPortfolio,
+            % agLayerIdx), which compares the 0/1 values of the logical
+            % vector against the layer indices and is always false.
+            loc = currentAgent.matrixLocation;
+            isAgAgent = any(currentPortfolio(agLayerIdx));
+            agentCount_all(loc, indexT) = agentCount_all(loc, indexT) + 1;
+            if netIncome < agentParameters.subsistence_costs
+                foodInsecureCount_all(loc, indexT) = foodInsecureCount_all(loc, indexT) + 1;
+            end
+            if isAgAgent
+                agentCount_ag(loc, indexT) = agentCount_ag(loc, indexT) + 1;
+                if netIncome < agentParameters.subsistence_costs
+                    foodInsecureCount_ag(loc, indexT) = foodInsecureCount_ag(loc, indexT) + 1;
+                end
+            end
         end
     end %if (mod(indexT, modelParameters.incomeInterval) == 0)
     
@@ -377,10 +414,17 @@ for indexT = 1:modelParameters.timeSteps
     end
     %%%%
     
-    if(modelParameters.listTimeStepYN)
-        fprintf([runName ' - Time step ' num2str(indexT) ' of ' num2str(modelParameters.timeSteps) ' - ' num2str(migrations(indexT)) ' migrations across ' num2str(numLivingAgents) ' total agents.\n']);
+    if(modelParameters.listTimeStepYN) % indexT = 15
+        % fprintf([runName ' - Time step ' num2str(indexT) ' of ' num2str(modelParameters.timeSteps) ' - ' num2str(migrations(indexT)) ' migrations across ' num2str(numLivingAgents) ' total agents.\n']);
+        if indexT <= modelParameters.spinupTime 
+            fprintf([runName ' - ' modelParameters.sspScenario ': initialisation step ' num2str(indexT) ' of ' num2str(modelParameters.spinupTime) '.\n']);
+        else 
+            sim_timestep = indexT-modelParameters.spinupTime ;
+            year = num2str(modelParameters.startYear + floor(sim_timestep /modelParameters.cycleLength));
+            quarter = num2str(mod(sim_timestep-1,modelParameters.cycleLength)+1);
+            fprintf([runName ' - ' modelParameters.sspScenario ': ' year '-Q' quarter ' of ' num2str(modelParameters.endYear) ' - ' num2str(migrations(indexT)) ' migrations across ' num2str(numLivingAgents) ' total agents.\n']);
+        end 
     end
-
     
     %%update portfolioHistory
     for indexJ = 1:numLocations
@@ -400,6 +444,12 @@ outputs.averageExpectedOpening = averageExpectedOpening;
 outputs.utilityHistory = utilityVariables.utilityHistory;
 outputs.portfolioHistory = portfolioHistory;
 outputs.trappedHistory = trappedHistory;
+% Food insecurity: fraction of agent-timesteps below subsistence (post-spinup, per location)
+spinupEnd = modelParameters.spinupTime + 1;
+outputs.foodInsecureCount_ag   = foodInsecureCount_ag(:,  spinupEnd:end);
+outputs.foodInsecureCount_all  = foodInsecureCount_all(:, spinupEnd:end);
+outputs.agentCount_ag          = agentCount_ag(:,         spinupEnd:end);
+outputs.agentCount_all         = agentCount_all(:,        spinupEnd:end);
 outputs.aspirationHistory = aspirationHistory;
 
 agentList = agentList(1:agentParameters.currentID-1);

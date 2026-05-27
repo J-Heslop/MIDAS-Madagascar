@@ -104,7 +104,7 @@ if isempty(portfolio)
                 end
             end
             if ~any(portfolio)
-                disp('Empty portfolio')
+                %disp('Empty portfolio')
             end
         end
 
@@ -167,24 +167,28 @@ if isempty(portfolio)
                 selectableLayers(indexS) = false;    
             end
         end
-        %Now, figure out duration, based on time needed to get sufficiently trained
-        if any(portfolioPrereqs) & (duration < numPeriodsEvaluate)
+        %Now, figure out duration, based on time needed to get sufficiently trained.
+        %Guard: if all layers were aspirational and removed, samplePortfolio may be
+        %all-false, making utilityDuration(samplePortfolio,2) an empty 0x1 vector.
+        %min() of a 0x1 vector returns 0x1 (not a scalar), which breaks downstream
+        %arithmetic.  Fall back to numPeriodsEvaluate in that case.
+        if ~any(samplePortfolio)
+            highfidelityDuration = numPeriodsEvaluate;
+        elseif any(portfolioPrereqs) && (duration < numPeriodsEvaluate)
             highfidelityDuration = min(duration, min(utilityDuration(samplePortfolio,2) - agentTraining(samplePortfolio)));
         else
-            %If no prereqs, set highFidelity duration to max time allowed
-            %in portfolio
+            %If no prereqs, set highFidelity duration to max time allowed in portfolio
             highfidelityDuration = min(numPeriodsEvaluate, min(utilityDuration(samplePortfolio,2) - agentTraining(samplePortfolio)));
         end
-        
+
         portfolioSets(1,:) = [samplePortfolio' highfidelityDuration 1];
-        
+
         %If highfidelityDuration < numPeriodsEvaluate, check if agent can afford aspiration after completing prereqs
         newIncome = 0;
         %Average income across all seasons
         for indexT = 1:size(constraints(:,2:end),2)
             newIncome = newIncome + (samplePortfolio' * currentUtilities(:,:,indexT)') .* 1/size(constraints(:,2:end),2);
         end
-
         newTraining = agentExperience + samplePortfolio .* highfidelityDuration;
         agentResources = agentWealth + newIncome * highfidelityDuration;
         
@@ -401,7 +405,7 @@ end
 
 %Test for empty portfolios
 if isempty(portfolio)
-    test = 'empty portfolio in createPortfolio'
+    %test = 'empty portfolio in createPortfolio'
 end
 end
 

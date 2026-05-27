@@ -178,10 +178,21 @@ for indexL = 1:length(locationList)
     %most expensive in the routine.  instead, take advantage of the fact
     %that a logical vector describes a unique binary number, sort the
     %vector of binary numbers and remove duplicates.  way faster.
-    binaryPortfolio = bi2de(nearTermPortfolios);
-    [bSort,iSort] = sort(binaryPortfolio);
-    iKeptPortfolios = iSort([true; diff(bSort)>0]);
-    nearTermPortfolioSet = nearTermPortfolios(iKeptPortfolios,:);
+    %
+    %Original used bi2de (Communications Toolbox); replaced with a base-
+    %MATLAB equivalent so this works on cluster MATLAB installs without
+    %the toolbox. bi2de's default is right-msb (left-most bit is LSB),
+    %so the equivalent is row * 2.^(0:N-1)'. For wide portfolios where
+    %2^N would overflow double precision, fall back to unique(...,'rows').
+    nLayerCols = size(nearTermPortfolios,2);
+    if nLayerCols <= 52
+        binaryPortfolio = double(nearTermPortfolios) * (2.^(0:nLayerCols-1))';
+        [bSort,iSort] = sort(binaryPortfolio);
+        iKeptPortfolios = iSort([true; diff(bSort)>0]);
+        nearTermPortfolioSet = nearTermPortfolios(iKeptPortfolios,:);
+    else
+        [nearTermPortfolioSet, iKeptPortfolios] = unique(nearTermPortfolios,'rows','stable');
+    end
 
     %identify which layers are used across any of the portfolios being
     %evaluated (so we can ignore the rest)

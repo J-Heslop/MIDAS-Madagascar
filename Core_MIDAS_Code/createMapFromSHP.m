@@ -56,7 +56,6 @@ catch
         error('SHP file identifiers are incomplete - please fix and retry.')
     end
  
-    
     %The algorithm reads 'units' as areas in a 2D grid that all have the same
     %value.  For each unit it sees at one scale, it will subdivide into m
     %different areas at the next scale.
@@ -65,7 +64,7 @@ catch
     %plus another to sit on top, just to get the algorithm started
     
     %This top layer gets values of '1' in all cells ... i.e., one 'unit'.  The
-    %FIRST administrative layer in the input data (i.e., the countries) will be
+    %FIRST administrative layer in the input data (i.e., the ADM2_regions) will be
     %constructed in the second layer of this map
     
     %just remember that in this algorithm, indexI+1 refers to the map layer
@@ -104,7 +103,7 @@ catch
     totalShapes = length(shapeData);
     fprintf(['Mapping ' num2str(totalShapes) ' polygons ...']);
     newMsg = [];
-    for indexJ = 1:length(shapeData)
+    for indexJ = 1:length(shapeData) %  indexJ = 1
         outcome = vec2mtx(shapeData(indexJ).Y, shapeData(indexJ).X, tempMap, r1, 'filled');
         tempMap(outcome < 2) = indexJ;
         shapeData(indexJ).matrixID = indexJ;

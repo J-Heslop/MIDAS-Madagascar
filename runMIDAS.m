@@ -15,7 +15,6 @@ saveDirectory = './Outputs/';
 
 input = [];
 
-
 %this next line runs the MIDAS model
 output = midasMainLoop(input, runName);
 

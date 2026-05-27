@@ -22,10 +22,7 @@ for indexI = 1:portfolioLayers
     %"indexI
     if agentExperience(indexI) >= maxDuration(indexI)
         selectable(indexI) = 0;
-        if indexI == 4
-            print('Index 4 de-selected')
-        end
-        
+
     
     %Next check if layer "indexI" requires any other layers as prereqs
     elseif any(neededTraining(indexI,:))
