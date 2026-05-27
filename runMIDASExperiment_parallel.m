@@ -1,28 +1,44 @@
-function runMIDASExperiment_parallel(nWorkers, taskId, runsPerTask)
+function runMIDASExperiment_parallel(nWorkers, taskId, drawsPerTask, nRealisations)
 % runMIDASExperiment_parallel  --  parfor-enabled calibration runner
 %
 % Identical to runMIDASExperiment but uses parfor instead of for.
 % Call this from the SLURM script after opening a parpool.
 %
 % Usage (single-shot, e.g. interactive):
-%   runMIDASExperiment_parallel(20);            % 200 runs, rng('shuffle')
+%   runMIDASExperiment_parallel(20);            % defaults: 200 single-realisation runs
 %
-% Usage (SLURM array task, called from run_calibration.m):
-%   runMIDASExperiment_parallel(20, taskId, runsPerTask);
+% Usage (SLURM array task with multi-realisation, called from run_calibration.m):
+%   runMIDASExperiment_parallel(20, taskId, drawsPerTask, nRealisations);
 %
 % Inputs:
-%   nWorkers     - workers in parpool (informational; pool may already be open)
-%   taskId       - SLURM_ARRAY_TASK_ID (0 = non-array single-shot run)
-%   runsPerTask  - number of MC runs this invocation should perform
+%   nWorkers       - workers in parpool (informational; pool may already be open)
+%   taskId         - SLURM_ARRAY_TASK_ID (0 = non-array single-shot run)
+%   drawsPerTask   - number of UNIQUE parameter draws this task will sample
+%   nRealisations  - number of seed replications per draw (1 = single-realisation,
+%                    3 = three different RNG seeds per draw for noise averaging)
 %
-% When taskId > 0, RNG is seeded with taskId so each array task draws a
-% disjoint, reproducible chunk of the parameter space. Output files and
-% the experiment summary are tagged with the task ID so concurrent array
-% tasks writing into ./Outputs/ do not collide.
+% Total runs this task performs = drawsPerTask * nRealisations.
+%
+% Multi-realisation rationale: each parameter set is run nRealisations times
+% with different RNG seeds. buildNextRound.m groups runs by parameter vector
+% and averages their fit metrics before scoring, so seed-driven noise in any
+% single run cancels out and the score reflects the parameter set's true
+% performance rather than RNG luck.
+%
+% RNG seeding (deterministic per task / draw / realisation):
+%   rng( taskId * 10000 + drawIdx * 10 + realisationIdx )
+% This guarantees disjoint, reproducible streams across the array.
+%
+% File tagging:
+%   Outputs/MC_Run_T<task>_D<draw>_R<realisation>_<date>.mat   (multi-realisation)
+%   Outputs/MC_Run_T<task>_<run>_<date>.mat                    (single-realisation, legacy)
 
-if nargin < 1 || isempty(nWorkers);    nWorkers    = 20;  end
-if nargin < 2 || isempty(taskId);      taskId      = 0;   end
-if nargin < 3 || isempty(runsPerTask); runsPerTask = 200; end
+if nargin < 1 || isempty(nWorkers);      nWorkers      = 20;  end
+if nargin < 2 || isempty(taskId);        taskId        = 0;   end
+if nargin < 3 || isempty(drawsPerTask);  drawsPerTask  = 200; end
+if nargin < 4 || isempty(nRealisations); nRealisations = 1;   end
+
+modelRuns = drawsPerTask * nRealisations;   % total parfor iterations
 
 % Add paths FIRST so workers inherit them when the pool starts
 addpath('./Override_Core_MIDAS_Code');
@@ -31,10 +47,31 @@ addpath('./Core_MIDAS_Code');
 
 % Open or reuse a parallel pool. Doing this AFTER addpath ensures workers
 % inherit the project paths (parpool snapshots the client path at startup).
+%
+% CRITICAL for SLURM array jobs: give each array task its OWN
+% JobStorageLocation. The 'local' profile defaults to a SHARED directory
+% under ~/.matlab/local_cluster_jobs, so when many array tasks open pools
+% concurrently they corrupt each other's pool metadata -- which can abort
+% the pool launch and (when the task is then killed) leaves empty logs.
+% Pointing each task at a unique, node-local scratch dir eliminates the
+% collision. Falls back gracefully to tempdir when not in an array.
 existingPool = gcp('nocreate');
 if isempty(existingPool)
-    fprintf('Opening parallel pool with %d workers...\n', nWorkers);
-    parpool('local', nWorkers);
+    pc = parcluster('local');
+
+    tmpRoot = getenv('TMPDIR');
+    if isempty(tmpRoot); tmpRoot = tempdir; end
+    aJob  = getenv('SLURM_ARRAY_JOB_ID');
+    aTask = getenv('SLURM_ARRAY_TASK_ID');
+    if isempty(aJob);  aJob  = num2str(feature('getpid')); end
+    if isempty(aTask); aTask = '0'; end
+    jobDir = fullfile(tmpRoot, sprintf('midas_pool_%s_%s', aJob, aTask));
+    if ~exist(jobDir, 'dir'); mkdir(jobDir); end
+    pc.JobStorageLocation = jobDir;
+
+    fprintf('Opening parallel pool with %d workers (JobStorageLocation = %s)...\n', ...
+            nWorkers, jobDir);
+    parpool(pc, nWorkers);
 elseif existingPool.NumWorkers ~= nWorkers
     fprintf('Existing parpool has %d workers (requested %d) - reusing.\n', ...
             existingPool.NumWorkers, nWorkers);
@@ -69,16 +106,28 @@ if ~exist(saveDirectory, 'dir')
     mkdir(saveDirectory);
 end
 
-% Number of runs this invocation will perform. When called from the SLURM
-% array driver (run_calibration.m), runsPerTask is the campaign total
-% (numTotalRuns) divided by the array size. For interactive single-shot
-% runs the default is 200.
-%   Round 1 (wide priors): aim for ~1000 runs total across the array
-%   Round 2+ (narrowed):  aim for ~200-300 runs total
-modelRuns = runsPerTask;
+% modelRuns is computed from function arguments above as
+% drawsPerTask * nRealisations. For a single-realisation legacy-mode call
+% (nRealisations=1), this reduces to drawsPerTask -- matching the round-1/2/3
+% behaviour exactly. For multi-realisation calibration (nRealisations=3 from
+% round 4 onward), it expands so that every parameter draw is run multiple
+% times with different RNG seeds.
+fprintf('Runs this task: %d draws x %d realisations = %d total iterations.\n', ...
+        drawsPerTask, nRealisations, modelRuns);
 
-try load updatedMCParams
+% Load narrowed bounds from the previous round if present; otherwise build
+% the full wide-prior parameter table from scratch. The explicit log lines
+% below make the mode unambiguous in the .out file -- a round that was meant
+% to use narrowed bounds but prints "FRESH WIDE priors" means
+% updatedMCParams.mat was missing from the run directory (silent fallback),
+% which previously went unnoticed and caused a round to re-explore the full
+% prior space instead of the narrowed one.
+try
+    load updatedMCParams
+    fprintf('Loaded NARROWED bounds from updatedMCParams.mat (%d parameters).\n', height(mcParams));
 catch
+
+    fprintf('No updatedMCParams.mat found -- building FRESH WIDE priors.\n');
 
     %define the parameter space (same as runMIDASExperiment.m)
     mcParams = table([],[],[],[],'VariableNames',{'Name','Lower','Upper','RoundYN'});
@@ -187,10 +236,20 @@ catch
     mcParams = [mcParams; {'modelParameters.droughtScaleFactor', 0.05, 0.40, 0}];
 end
 
-%build the full design
-fprintf('Building experiment list (%d runs)...\n', modelRuns);
-experimentList = cell(modelRuns, 1);
-for indexI = 1:modelRuns
+% Build the experimental design.
+% First draw drawsPerTask UNIQUE parameter sets, then replicate each into
+% nRealisations slots so the parfor loop runs modelRuns total iterations.
+% Same parameter set, different RNG seeds per realisation -- buildNextRound.m
+% groups by parameter vector and averages metrics before scoring.
+fprintf('Building experiment list (%d unique draws x %d realisations = %d total iterations)...\n', ...
+        drawsPerTask, nRealisations, modelRuns);
+
+experimentList  = cell(modelRuns, 1);
+drawIdxList     = zeros(modelRuns, 1);   % which unique draw this iteration belongs to (1..drawsPerTask)
+realisationList = zeros(modelRuns, 1);   % which realisation within the draw (1..nRealisations)
+
+for d = 1:drawsPerTask
+    % Sample one parameter vector for this draw
     experiment = table([], [], 'VariableNames', {'parameterNames','parameterValues'});
     for indexJ = 1:height(mcParams)
         tempName  = mcParams.Name{indexJ};
@@ -202,7 +261,14 @@ for indexI = 1:modelRuns
         end
         experiment = [experiment; {tempName, tempValue}];
     end
-    experimentList{indexI} = experiment;
+
+    % Replicate the same parameter vector into nRealisations slots
+    for r = 1:nRealisations
+        slot = (d - 1) * nRealisations + r;
+        experimentList{slot}  = experiment;
+        drawIdxList(slot)     = d;
+        realisationList(slot) = r;
+    end
 end
 
 % Tag the experiment summary and per-run output filenames with the array
@@ -218,13 +284,27 @@ end
 
 fprintf('Saving experiment list (taskTag=''%s'').\n', taskTag);
 save([saveDirectory 'experiment_' date '_' taskTag 'input_summary'], ...
-     'experimentList', 'mcParams', 'taskId', 'runsPerTask');
+     'experimentList', 'mcParams', 'taskId', ...
+     'drawsPerTask', 'nRealisations', ...
+     'drawIdxList', 'realisationList');
 
-% Pre-generate output filenames (required for parfor slicing)
+% Pre-generate output filenames (required for parfor slicing). For
+% multi-realisation runs use the _D<draw>_R<realisation> tag so
+% buildNextRound.m can detect grouping (it also detects by hashing
+% parameter values, so this is belt-and-braces). For single-realisation
+% legacy runs keep the original ..._<run>_<date>.mat naming.
 outputFiles = cell(modelRuns, 1);
 for indexI = 1:modelRuns
-    fname = sprintf('%s%s%s%d_%s.mat', ...
-                    saveDirectory, series, taskTag, indexI, datestr(now,'yyyy-mm-dd'));
+    if nRealisations > 1
+        fname = sprintf('%s%s%sD%03d_R%d_%s.mat', ...
+                        saveDirectory, series, taskTag, ...
+                        drawIdxList(indexI), realisationList(indexI), ...
+                        datestr(now,'yyyy-mm-dd'));
+    else
+        fname = sprintf('%s%s%s%d_%s.mat', ...
+                        saveDirectory, series, taskTag, indexI, ...
+                        datestr(now,'yyyy-mm-dd'));
+    end
     fname = strrep(fname, ':', '-');
     fname = strrep(fname, ' ', '_');
     outputFiles{indexI} = fname;
@@ -235,18 +315,38 @@ fprintf('Launching parfor loop with %d runs...\n', modelRuns);
 % parfor requires all variables accessed inside to be sliced or broadcast
 parfor indexI = 1:modelRuns
     try
+        % Deterministic per-(task, draw, realisation) RNG seed. parfor
+        % workers run in independent processes with their own RNG state,
+        % so we re-seed at the START of each iteration to guarantee that
+        % (a) realisations of the SAME parameter set get DIFFERENT seeds
+        % and (b) re-running a specific (task, draw, realisation) triple
+        % reproduces its output exactly.
+        if taskId > 0
+            rng(taskId * 10000 + drawIdxList(indexI) * 10 + realisationList(indexI));
+        end
+
         input  = experimentList{indexI};
-        output = midasMainLoop(input, ['Experiment Run ' num2str(indexI)]);
+        runLabel = sprintf('Task %d Draw %d Realisation %d', ...
+                           taskId, drawIdxList(indexI), realisationList(indexI));
+        output = midasMainLoop(input, runLabel);
 
         functionVersions = inmem('-completenames');
         functionVersions = functionVersions(strmatch(pwd, functionVersions));
         output.codeUsed  = functionVersions;
 
+        % Tag the saved output with draw/realisation indices so downstream
+        % code can group runs even when filenames are not parsed.
+        output.taskId         = taskId;
+        output.drawIdx        = drawIdxList(indexI);
+        output.realisationIdx = realisationList(indexI);
+
         currentFile = outputFiles{indexI};
         saveToFile(input, output, currentFile);
-        fprintf('  Run %d/%d complete -> %s\n', indexI, modelRuns, currentFile);
+        fprintf('  Iter %d/%d (D%d R%d) complete -> %s\n', ...
+                indexI, modelRuns, drawIdxList(indexI), realisationList(indexI), currentFile);
     catch ME
-        fprintf('  Run %d/%d FAILED: %s\n', indexI, modelRuns, ME.message);
+        fprintf('  Iter %d/%d (D%d R%d) FAILED: %s\n', ...
+                indexI, modelRuns, drawIdxList(indexI), realisationList(indexI), ME.message);
         for kStack = 1:length(ME.stack)
             fprintf('    at %s (line %d)\n', ME.stack(kStack).name, ME.stack(kStack).line);
         end

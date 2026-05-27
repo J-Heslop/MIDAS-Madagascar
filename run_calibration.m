@@ -47,15 +47,43 @@ fprintf('SLURM_ARRAY_JOB_ID  = %s\n', arrayJob);
 fprintf('SLURM_ARRAY_TASK_ID = %d (of %d tasks)\n', arrayId, arrayCnt);
 
 % ----- Calibration sizing -----
-% Target total runs across the whole array. Edit here when you change
-% the campaign size (and update --array=1-N%K in submit_calibration.sh).
-numTotalRuns = 1000;
+% Two knobs drive the campaign size:
+%   numTotalDraws  = number of UNIQUE parameter combinations sampled across
+%                    the array. Each draw produces nRealisations runs.
+%   nRealisations  = how many times each parameter set is replicated with
+%                    a different RNG seed. buildNextRound.m averages metric
+%                    scores across these realisations before scoring/narrowing,
+%                    so seed-driven noise in any single run cancels out.
+%
+% Multi-realisation (nRealisations >= 2) becomes important as the parameter
+% space narrows in later rounds, when parameter sets are close to each other
+% and individual-run noise can otherwise dominate the score. From round 4
+% onward we use nRealisations = 3.
+%
+% Total runs across the array = numTotalDraws * nRealisations.
+%
+% IMPORTANT wall-clock constraint: each task does
+%     drawsPerTask * nRealisations parfor iterations
+% on a fixed pool of (typically 20) workers. If that product exceeds the
+% worker count, the parfor will queue extra iterations sequentially,
+% potentially doubling wall-clock and risking the 12-hour SLURM budget.
+% Sizing rule of thumb:
+%     numTotalDraws / arrayCnt * nRealisations  <=  SLURM_CPUS_PER_TASK
+% Defaults below: 300 / 50 * 3 = 18 iterations per task on 20 workers.
+%
+% Edit both numbers here when changing the campaign size, and update
+% --array=1-N%K in submit_calibration.sh accordingly.
+numTotalDraws = 1000;
+nRealisations = 3;
+
 if arrayId == 0
-    runsPerTask = numTotalRuns;
+    drawsPerTask = numTotalDraws;
 else
-    runsPerTask = ceil(numTotalRuns / arrayCnt);
+    drawsPerTask = ceil(numTotalDraws / arrayCnt);
 end
-fprintf('numTotalRuns = %d, runsPerTask = %d\n', numTotalRuns, runsPerTask);
+fprintf(['numTotalDraws = %d, nRealisations = %d, drawsPerTask = %d, ' ...
+         'total iterations this task = %d\n'], ...
+         numTotalDraws, nRealisations, drawsPerTask, drawsPerTask * nRealisations);
 
 % ----- Sanity check -----
 if exist('runMIDASExperiment_parallel.m', 'file') ~= 2
@@ -65,6 +93,6 @@ end
 
 % ----- Run -----
 % addpath / parpool / RNG seeding are handled inside runMIDASExperiment_parallel.
-runMIDASExperiment_parallel(nWorkers, arrayId, runsPerTask);
+runMIDASExperiment_parallel(nWorkers, arrayId, drawsPerTask, nRealisations);
 
 fprintf('=== run_calibration.m completed at %s ===\n', datestr(now));

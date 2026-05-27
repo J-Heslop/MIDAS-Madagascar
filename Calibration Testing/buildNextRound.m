@@ -182,9 +182,9 @@ foodInsecureTarget_upper  = 0.75;        % ever insecure in a year -- upper plau
 %  EVALUATE MODEL RUNS
 % -----------------------------------------------------------------------
 %try
-    %load evaluationOutputs
-    %disp('Loaded cached evaluationOutputs.');
-    %disp(outputListRun);
+%    load evaluationOutputs
+%    disp('Loaded cached evaluationOutputs.');
+%    disp(outputListRun);
 %catch
     fileList = dir('D:/MIDAS outputs/MC*.mat'); % dir('../Outputs/MC*.mat');
     if isempty(fileList)
@@ -410,6 +410,78 @@ foodInsecureTarget_upper  = 0.75;        % ever insecure in a year -- upper plau
     fileList(skip) = [];
 
     fprintf('\nSuccessfully evaluated %d runs.\n', height(inputListRun));
+
+    % -------------------------------------------------------------------
+    % MULTI-REALISATION AVERAGING
+    %
+    % From round 4 onward each parameter set is run multiple times with
+    % different RNG seeds (see run_calibration.m's nRealisations). Here
+    % we detect runs sharing the same parameter vector by hashing the
+    % input row, group them, and average all metric columns. This removes
+    % seed-driven noise from the score before narrowing.
+    %
+    % For single-realisation rounds (or mixed-round MC files) every
+    % parameter vector is unique, so each group has size 1 and the
+    % averaging is a no-op -- the code below collapses gracefully.
+    % -------------------------------------------------------------------
+    if height(inputListRun) > 0
+        nRunsPreGroup = height(inputListRun);
+        inputArr = table2array(inputListRun);
+
+        % Hash each row of parameter values to a string key. %.10g gives
+        % enough precision to distinguish genuinely different draws while
+        % keeping identical draws bit-identical after the table->array
+        % round trip.
+        paramHashes = cell(nRunsPreGroup, 1);
+        for kRow = 1:nRunsPreGroup
+            paramHashes{kRow} = sprintf('%.10g,', inputArr(kRow, :));
+        end
+        [uniqueHashes, ~, groupIdx] = unique(paramHashes);
+        nGroups = numel(uniqueHashes);
+
+        if nGroups < nRunsPreGroup
+            % There are repeated parameter sets -- average within groups.
+            fprintf(['Multi-realisation detected: %d runs across %d unique parameter sets ' ...
+                     '(mean %.1f realisations per set).\n'], ...
+                     nRunsPreGroup, nGroups, nRunsPreGroup / nGroups);
+
+            % Preallocate grouped tables by taking the first row of each
+            % group as a template (inputs are identical within a group).
+            firstIdxPerGroup = zeros(nGroups, 1);
+            for g = 1:nGroups
+                firstIdxPerGroup(g) = find(groupIdx == g, 1, 'first');
+            end
+            groupedInput  = inputListRun(firstIdxPerGroup, :);
+            groupedOutput = outputListRun(firstIdxPerGroup, :);
+
+            % Average all numeric output columns within each group (NaN-aware)
+            outVarNames = outputListRun.Properties.VariableNames;
+            for cIdx = 1:numel(outVarNames)
+                v = outputListRun.(outVarNames{cIdx});
+                if isnumeric(v)
+                    avg = zeros(nGroups, 1);
+                    for g = 1:nGroups
+                        mask = (groupIdx == g);
+                        vals = v(mask);
+                        avg(g) = mean(vals(~isnan(vals)));
+                    end
+                    groupedOutput.(outVarNames{cIdx}) = avg;
+                end
+            end
+
+            % Keep an arbitrary representative filename per group for traceability
+            groupedFileList = fileList(firstIdxPerGroup);
+
+            % Replace the per-run tables with the grouped versions for all
+            % downstream summary / scoring / narrowing logic.
+            inputListRun  = groupedInput;
+            outputListRun = groupedOutput;
+            fileList      = groupedFileList;
+        else
+            fprintf('No repeated parameter sets detected (single-realisation mode).\n');
+        end
+    end
+
     save evaluationOutputs inputListRun outputListRun fileList;
 %end
 
@@ -487,12 +559,29 @@ end
 %
 % Weights: roughly equal across the three targets (~1/3 each).
 % If a target is unavailable (NaN), its weight is redistributed proportionally.
+%
+% IMPORTANT: all three component scores must be on the SAME 0-1 scale for
+% the equal weights to mean equal influence. The urban and food-insecurity
+% components are batch-relative (1 - error/maxError, spanning 0-1 within the
+% batch). The migration component must be put on the same footing -- using
+% the raw popWeightFlowFrac_r2 (which only spans ~0-0.34) would give
+% migration roughly a third of its intended weight, so the top-X% selection
+% ends up driven almost entirely by urban + food insecurity and the
+% migration parameters never narrow. We therefore batch-normalise migration
+% the same way: migScore = r2 / max(r2 in batch).
 migWeight   = 0.34;
 urbanWeight = 0.33;
 fiWeight    = 0.33;
 
 hasUrban = ~isnan(outputListRun.urbanFracNatError);
 hasFI    = ~isnan(outputListRun.foodInsecureRate_ag);
+
+% Normalise migration r² to a batch-relative 0-1 score (1 = best fit in batch).
+% Unlike urban/FI this is a goodness metric (higher = better), so we divide
+% by the batch max rather than inverting an error.
+maxMig = max(outputListRun.popWeightFlowFrac_r2);
+if isempty(maxMig) || maxMig <= 0; maxMig = 1; end
+migScore = outputListRun.popWeightFlowFrac_r2 / maxMig;
 
 % Normalise urban-fraction error to 0-1 score (1 = perfect, 0 = worst)
 maxUrbanError = max(outputListRun.urbanFracNatError(hasUrban));
@@ -508,7 +597,7 @@ fiScore(~hasFI) = NaN;
 
 % Build combined score, redistributing weights for missing targets
 activeWeights = migWeight + urbanWeight * any(hasUrban) + fiWeight * any(hasFI);
-combinedScore = (migWeight / activeWeights) * outputListRun.popWeightFlowFrac_r2;
+combinedScore = (migWeight / activeWeights) * migScore;
 
 if any(hasUrban)
     urbanScoreAdj = urbanScore;
@@ -539,12 +628,44 @@ if isempty(expList)
 end
 load(fullfile(expList(end).folder, expList(end).name));  % loads mcParams
 
+% Narrowing rule: take the 5th and 95th percentile of each parameter's
+% values across the top-scoring runs, rather than the absolute min and max.
+% This is robust to outliers -- a single top-50 run with an extreme value
+% on a parameter no longer pins the bound to that extreme. With 50 runs
+% in the top 5%, the 5th and 95th percentiles correspond to roughly the
+% 3rd and 47th order statistics, dropping the two most extreme values at
+% each end.
+%
+% Effect on round 3: in that round urbanIncomeMultiplier narrowed only from
+% [0.5, 1.5] to [0.539, 1.493] under min/max, almost certainly because a
+% small number of outliers dragged the bounds to the wall. Quantile-based
+% narrowing should give a meaningfully tighter range when the bulk of the
+% top-50 clusters away from the prior boundaries.
+NARROWING_QUANTILE_LOWER = 0.05;
+NARROWING_QUANTILE_UPPER = 0.95;
+
 for indexI = 1:height(mcParams)
     varName = strrep(mcParams.Name{indexI}, '.', '');
     tempIndex = find(strcmp(inputListRun.Properties.VariableNames, varName));
     if ~isempty(tempIndex)
-        mcParams.Lower(indexI) = min(table2array(bestInputs(:, tempIndex)));
-        mcParams.Upper(indexI) = max(table2array(bestInputs(:, tempIndex)));
+        values = table2array(bestInputs(:, tempIndex));
+        if numel(values) < 2
+            % Degenerate top set: keep original bounds untouched.
+            continue;
+        end
+        mcParams.Lower(indexI) = quantile(values, NARROWING_QUANTILE_LOWER);
+        mcParams.Upper(indexI) = quantile(values, NARROWING_QUANTILE_UPPER);
+        % If the original prior was integer-valued, round the new bounds
+        % back to integers to keep the calibration consistent with the
+        % parameter type. mcParams.RoundYN is the source-of-truth flag.
+        if mcParams.RoundYN(indexI)
+            mcParams.Lower(indexI) = floor(mcParams.Lower(indexI));
+            mcParams.Upper(indexI) = ceil(mcParams.Upper(indexI));
+        end
+        % Guard against the quantile range collapsing to a point.
+        if mcParams.Upper(indexI) <= mcParams.Lower(indexI)
+            mcParams.Upper(indexI) = mcParams.Lower(indexI) + eps;
+        end
     else
         fprintf('  WARNING: parameter "%s" not found in run outputs.\n', varName);
     end
