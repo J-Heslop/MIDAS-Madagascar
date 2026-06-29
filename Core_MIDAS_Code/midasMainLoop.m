@@ -24,17 +24,35 @@ averageWealth = zeros(modelParameters.timeSteps ,1);
 migrations = zeros(modelParameters.timeSteps,1);
 outMigrations = zeros(numLocations, modelParameters.timeSteps);
 inMigrations = zeros(numLocations, modelParameters.timeSteps);
+distressMigrations = zeros(numLocations, modelParameters.timeSteps);  % out-migrations triggered by the distress overlay (subset of outMigrations)
 migrationMatrix = zeros(numLocations,numLocations,modelParameters.timeSteps);
 portfolioHistory = cell(numLocations, modelParameters.timeSteps);
 trappedHistory = zeros(length(agentList),modelParameters.timeSteps);
 aspirationHistory = zeros(numLayers, modelParameters.timeSteps);
-% Food insecurity tracker: counts agents whose net income fell below subsistence_costs
-% Rows = locations, cols = timesteps. Separate counts for ag and all agents.
+% Food insecurity tracker (ANNUAL aggregation, not per-timestep).
+% Rows = locations, cols = YEARS (not timesteps). Separate counts for ag
+% and all agents.
+%
+% Why annual: ag layers in MIDAS only generate income in their harvest
+% quarter (rice Q2, maize Q1, cassava/vanilla Q4, industrial_crop Q3).
+% A per-timestep "netIncome < subsistence_costs" check therefore flagged
+% subsistence farmers as food-insecure in the 3/4 of timesteps with zero
+% income, even though the annual harvest covered subsistence with room
+% to spare -- producing a structural ~75% food-insecurity floor that was
+% an artefact of the time aggregation, not a real model behaviour.
+%
+% We now check at year-end (every cycleLength timesteps): if the agent's
+% wealth declined over the year, their annual income did not cover their
+% annual subsistence consumption and they are flagged food-insecure for
+% that year. This is equivalent to the original conceptual definition
+% (annual_netIncome < annual_subsistence) and aligns with how Harvey et
+% al. (2014) measured months of food insufficiency per year.
 agLayerIdx = find(utilityVariables.localOnly);  % indices of agricultural (local-only) layers
-foodInsecureCount_ag  = zeros(numLocations, modelParameters.timeSteps);
-foodInsecureCount_all = zeros(numLocations, modelParameters.timeSteps);
-agentCount_ag         = zeros(numLocations, modelParameters.timeSteps);
-agentCount_all        = zeros(numLocations, modelParameters.timeSteps);
+nYearsTotal = ceil(modelParameters.timeSteps / modelParameters.cycleLength);
+foodInsecureCount_ag  = zeros(numLocations, nYearsTotal);
+foodInsecureCount_all = zeros(numLocations, nYearsTotal);
+agentCount_ag         = zeros(numLocations, nYearsTotal);
+agentCount_all        = zeros(numLocations, nYearsTotal);
 %wealthHistory = zeros(modelParameters.numAgents,modelParameters.timeSteps);
 
 %create a list of shared layers, for use in choosing new link
@@ -239,8 +257,31 @@ for indexT = 1:modelParameters.timeSteps
         %be/what to do
         %% 
 
-        if(rand() < currentAgent.pChoose && indexT > modelParameters.spinupTime && currentAgent.age >= modelParameters.ageDecision)
-            [currentAgent, moved] = choosePortfolio(currentAgent, utilityVariables, indexT, modelParameters, mapParameters, demographicVariables, mapVariables);
+        % --- Decision trigger -------------------------------------------
+        % Two reasons the agent may evaluate a portfolio change this cycle:
+        %   (a) standard probabilistic trigger (pChoose) -- voluntary,
+        %       improvement-seeking deliberation
+        %   (b) distress-migration overlay (see Sections 4.4 / 5.1 of
+        %       the paper) -- forced move triggered by one of four
+        %       variants dispatched via checkDistressTrigger.m:
+        %         1 = consecutive food-insecure years (Variant A)
+        %         2 = wealth threshold + duration (Variant B)
+        %         3 = cumulative wealth shortfall (Variant C)
+        %         4 = stochastic depth-dependent (Variant D)
+        %       This represents asset-liquidation distress migration that
+        %       MIDAS's expected-income-NPV decision rule cannot otherwise
+        %       generate, because wealth depletion in the standard rule
+        %       traps agents rather than driving them to move.
+        ageOK   = currentAgent.age >= modelParameters.ageDecision;
+        postSpin = indexT > modelParameters.spinupTime;
+
+        isDistress = postSpin && ageOK && ...
+                     checkDistressTrigger(currentAgent, modelParameters, indexT);
+
+        isStandard = postSpin && ageOK && rand() < currentAgent.pChoose;
+
+        if isDistress || isStandard
+            [currentAgent, moved] = choosePortfolio(currentAgent, utilityVariables, indexT, modelParameters, mapParameters, demographicVariables, mapVariables, isDistress);
             currentAgent.agentPortfolioHistory{indexT} = currentAgent.currentPortfolio;
             currentAgent.agentAspirationHistory{indexT} = currentAgent.currentAspiration;
             currentAgent.consideredHistory{indexT} = currentAgent.consideredPortfolios;
@@ -250,12 +291,25 @@ for indexT = 1:modelParameters.timeSteps
                 outMigrations(moved(1), indexT) = outMigrations(moved(1), indexT) + 1;
                 migrationMatrix(moved(1),moved(2),indexT) = migrationMatrix(moved(1),moved(2),indexT) + 1;
                 currentAgent.moveHistory = [currentAgent.moveHistory; indexT currentAgent.matrixLocation currentAgent.visX currentAgent.visY];
-                
+
+                if isDistress
+                    % Tag this as a distress-driven move and reset the
+                    % counter associated with the active trigger variant,
+                    % so the same agent isn't re-triggered immediately
+                    % at the next cycle. (Variants 3 and 4 have no
+                    % counter -- C reads wealthHistory on the fly, D
+                    % is purely instantaneous. We still reset the A and
+                    % B counters defensively, in case the agent was
+                    % carrying both signals.)
+                    distressMigrations(moved(1), indexT) = distressMigrations(moved(1), indexT) + 1;
+                    currentAgent.consecutiveFIYears = 0;
+                    currentAgent.quartersBelowWealthThreshold = 0;
+                end
             end
-            
+
             %update these line in the arrays used to choose new links
             agentLayers(currentAgent.id,:) = currentAgent.currentPortfolio(1,1:size(utilityVariables.utilityHistory,2));
-            
+
             agentLocations(currentAgent.id) = currentAgent.matrixLocation;
         end
        
@@ -351,24 +405,73 @@ for indexT = 1:modelParameters.timeSteps
             currentAgent.wealth = currentAgent.wealth + netIncome - agentParameters.subsistence_costs;
             currentAgent.wealthHistory{indexT} = currentAgent.wealth;
 
-            % --- Food insecurity tracking ---
-            % currentPortfolio is a logical row vector of length numLayers
-            % (set at line 296), and agLayerIdx is an integer index list
-            % of ag (location-tied) layers. The agent is an "ag agent" if
-            % any of its true entries fall at an ag-layer position.
-            % NB: an earlier version of this used ismember(currentPortfolio,
-            % agLayerIdx), which compares the 0/1 values of the logical
-            % vector against the layer indices and is always false.
-            loc = currentAgent.matrixLocation;
-            isAgAgent = any(currentPortfolio(agLayerIdx));
-            agentCount_all(loc, indexT) = agentCount_all(loc, indexT) + 1;
-            if netIncome < agentParameters.subsistence_costs
-                foodInsecureCount_all(loc, indexT) = foodInsecureCount_all(loc, indexT) + 1;
+            % --- Wealth-threshold quarter counter (Variant B / distress) ---
+            % Updated every quarter (not just at year-end) because Variant B
+            % counts consecutive quarters below the threshold. We update
+            % the counter regardless of which variant is active so the
+            % state is always coherent; checkDistressTrigger gates on
+            % whether to actually use it.
+            if isfield(modelParameters, 'distressWealthThreshold')
+                if currentAgent.wealth < modelParameters.distressWealthThreshold
+                    currentAgent.quartersBelowWealthThreshold = ...
+                        currentAgent.quartersBelowWealthThreshold + 1;
+                else
+                    currentAgent.quartersBelowWealthThreshold = ...
+                        max(0, currentAgent.quartersBelowWealthThreshold - 1);
+                end
             end
-            if isAgAgent
-                agentCount_ag(loc, indexT) = agentCount_ag(loc, indexT) + 1;
-                if netIncome < agentParameters.subsistence_costs
-                    foodInsecureCount_ag(loc, indexT) = foodInsecureCount_ag(loc, indexT) + 1;
+
+            % --- Food insecurity tracking (ANNUAL, at year-end only) ---
+            % We only check at year-end (every cycleLength timesteps),
+            % comparing the agent's current wealth to its wealth at the
+            % end of the previous year. wealthHistory{T-cycleLength} is
+            % the previous year-end wealth; if it's empty the agent
+            % didn't exist a full year ago and we skip them.
+            %
+            % wealth_end < wealth_start <=> annual netIncome < annual
+            % subsistence consumption, because the per-timestep wealth
+            % accumulator already nets income against subsistence each
+            % step. So a wealth decline over the year IS the annual
+            % equivalent of the original "netIncome < subsistence_costs"
+            % check -- without the harvest-cycle artefact.
+            if mod(indexT, modelParameters.cycleLength) == 0
+                prevYearEndIdx = indexT - modelParameters.cycleLength;
+                yearIdx        = indexT / modelParameters.cycleLength;
+                loc            = currentAgent.matrixLocation;
+                isAgAgent      = any(currentPortfolio(agLayerIdx));
+
+                havePrevWealth = (prevYearEndIdx >= 1) && ...
+                                 (prevYearEndIdx <= length(currentAgent.wealthHistory)) && ...
+                                 ~isempty(currentAgent.wealthHistory{prevYearEndIdx});
+
+                if havePrevWealth
+                    wealthStartVal = currentAgent.wealthHistory{prevYearEndIdx};
+                    wealthEndVal   = currentAgent.wealth;
+                    wasInsecure    = (wealthEndVal < wealthStartVal);
+
+                    agentCount_all(loc, yearIdx) = agentCount_all(loc, yearIdx) + 1;
+                    if wasInsecure
+                        foodInsecureCount_all(loc, yearIdx) = foodInsecureCount_all(loc, yearIdx) + 1;
+                    end
+                    if isAgAgent
+                        agentCount_ag(loc, yearIdx) = agentCount_ag(loc, yearIdx) + 1;
+                        if wasInsecure
+                            foodInsecureCount_ag(loc, yearIdx) = foodInsecureCount_ag(loc, yearIdx) + 1;
+                        end
+                    end
+
+                    % Update consecutive-FI counter used by the distress-
+                    % migration overlay. Strict consecutive interpretation
+                    % would reset to 0 on any non-FI year; we use
+                    % decrement-by-1 (floor at 0) so that one good year
+                    % doesn't fully restore an agent that has been food-
+                    % insecure for several years -- more consistent with
+                    % the empirical kere recovery pattern.
+                    if wasInsecure
+                        currentAgent.consecutiveFIYears = currentAgent.consecutiveFIYears + 1;
+                    else
+                        currentAgent.consecutiveFIYears = max(0, currentAgent.consecutiveFIYears - 1);
+                    end
                 end
             end
         end
@@ -439,17 +542,26 @@ outputs.migrations = migrations;
 outputs.locations = mapVariables.locations;
 outputs.inMigrations = inMigrations;
 outputs.outMigrations = outMigrations;
+outputs.distressMigrations = distressMigrations;
 outputs.migrationMatrix = migrationMatrix;
 outputs.averageExpectedOpening = averageExpectedOpening;
 outputs.utilityHistory = utilityVariables.utilityHistory;
 outputs.portfolioHistory = portfolioHistory;
 outputs.trappedHistory = trappedHistory;
-% Food insecurity: fraction of agent-timesteps below subsistence (post-spinup, per location)
-spinupEnd = modelParameters.spinupTime + 1;
-outputs.foodInsecureCount_ag   = foodInsecureCount_ag(:,  spinupEnd:end);
-outputs.foodInsecureCount_all  = foodInsecureCount_all(:, spinupEnd:end);
-outputs.agentCount_ag          = agentCount_ag(:,         spinupEnd:end);
-outputs.agentCount_all         = agentCount_all(:,        spinupEnd:end);
+% Food insecurity: fraction of agent-YEARS where wealth declined (annual
+% income failed to cover annual subsistence), post-spinup, per location.
+% Year-indexed arrays (nLocations x nYearsTotal). Strip the spinup
+% portion: any year that ends entirely within or partially overlapping
+% the spinup period is dropped, leaving only fully post-spinup years.
+spinupYears = ceil(modelParameters.spinupTime / modelParameters.cycleLength);
+firstPostSpinupYear = spinupYears + 1;
+if firstPostSpinupYear > size(foodInsecureCount_ag, 2)
+    firstPostSpinupYear = size(foodInsecureCount_ag, 2);   % degenerate guard
+end
+outputs.foodInsecureCount_ag   = foodInsecureCount_ag(:,  firstPostSpinupYear:end);
+outputs.foodInsecureCount_all  = foodInsecureCount_all(:, firstPostSpinupYear:end);
+outputs.agentCount_ag          = agentCount_ag(:,         firstPostSpinupYear:end);
+outputs.agentCount_all         = agentCount_all(:,        firstPostSpinupYear:end);
 outputs.aspirationHistory = aspirationHistory;
 
 agentList = agentList(1:agentParameters.currentID-1);

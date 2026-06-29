@@ -113,6 +113,39 @@ modelParameters.speiFile = ['./Data/CEDA_SPEI_' modelParameters.sspScenario '.cs
 modelParameters.droughtVariabilityOn = false;
 modelParameters.droughtMarkovFile    = './Data/drought_markov_params.csv';
 modelParameters.droughtScaleFactor   = 0.10;
+
+% ----- Distress-migration overlay (see paper Sections 4.4 / 5.1) -----------
+% When enabled, agents flagged by checkDistressTrigger are forced to
+% migrate at the next quarterly cycle, regardless of the standard pChoose
+% probabilistic trigger. choosePortfolio is still used to pick the
+% destination, but the current location is excluded from the candidate
+% set (to force a move) and the credit constraint is relaxed (to allow
+% the move to proceed even when wealth is depleted, mimicking household
+% asset liquidation to fund displacement). Default: disabled.
+%
+% Four trigger variants are dispatched via distressTriggerCode:
+%   1 = Variant A: consecutive food-insecure years
+%   2 = Variant B: wealth threshold + duration
+%   3 = Variant C: cumulative wealth shortfall over rolling window
+%   4 = Variant D: stochastic depth-dependent (per-quarter draw)
+% See checkDistressTrigger.m for the dispatch logic.
+modelParameters.distressMigrationEnabled = true;
+modelParameters.distressTriggerCode = 1;   % default to Variant A
+
+% Variant A parameters
+modelParameters.distressN = 3;   % consecutive FI years to trigger (Variant A)
+
+% Variant B parameters (also reused by C and D for the threshold)
+modelParameters.distressWealthThreshold = 0.5;   % wealth value below which an agent is "in distress" (units: same as agent.wealth; subsistence_costs default = 0.3/quarter, so 0.5 = ~1.5 quarters of subsistence buffer)
+modelParameters.distressN_quarters = 8;          % consecutive quarters below threshold to trigger (Variant B; 8 = 2 years)
+
+% Variant C parameters
+modelParameters.distressShortfallWindowYears = 3;     % rolling window for shortfall accumulation (Variant C)
+modelParameters.distressCriticalShortfall    = 2.0;   % cumulative shortfall sum across the window to trigger (units: wealth-quarters)
+
+% Variant D parameters
+modelParameters.distressStochasticAlpha = 3.0;   % steepness of depth-to-probability response (Variant D; higher = more responsive to shortfall depth)
+
 modelParameters.saveImg = true;
 modelParameters.shortName = 'Mada_toy_application';
 agentParameters.currentID = 1;

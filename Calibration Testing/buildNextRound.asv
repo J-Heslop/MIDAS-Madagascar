@@ -57,7 +57,7 @@ quantileMarker = 0.05;  % keep top 5% of runs
 %  LOAD CENSUS MIGRATION DATA
 % -----------------------------------------------------------------------
 dataPath = '../Data/';  % adjust if running from a different directory
-censusPath = 'C:/Users/Jack/OneDrive - University of East Anglia/ISF - Migration modelling consultancy/Datasets/Census migration/';
+censusPath = 'Calibration_data/';
 % Try relative path first, then absolute fallback
 recentFile   = [censusPath 'madagascar_migration_recent.csv'];
 lifetimeFile = [censusPath 'madagascar_migration_lifetime_1.csv'];
@@ -186,10 +186,10 @@ foodInsecureTarget_upper  = 0.75;        % ever insecure in a year -- upper plau
 %    disp(outputListRun);
 %catch
 
-    results_set = ' 8';
-    fileList = dir(strcat('D:/MIDAS outputs/Set ', results_set,' - SS/MC*.mat'));
+    results_set = 7 ;
+    fileList = dir('D:/MIDAS outputs/Set 7 - SS/MC*.mat');
     if isempty(fileList)
-        error(strcat('No MC*.mat files found in D:/MIDAS outputs/Set ',results_set,' - SS/. Run runMIDASExperiment first.'));
+        error('No MC*.mat files found in /Outputs/. Run runMIDASExperiment first.');
     end
     fprintf('Found %d MC run files. Evaluating...\n', length(fileList));
 

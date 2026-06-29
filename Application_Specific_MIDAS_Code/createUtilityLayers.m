@@ -29,15 +29,73 @@ end
 %% -----------------------------------------------------------------------
 %% 2. UTILITY LAYER FUNCTIONS
 %% -----------------------------------------------------------------------
-% All layers use the same density-dependent function:
-%   utility = base * (m * nExpected) / ((n_actual - m*nExpected)*k + m*nExpected)
-% Income falls as more agents compete for the same layer.
+% Each layer splits its yield between a SUBSISTENCE share (kept by the
+% household for own consumption, immune to local market congestion) and
+% a MARKET share (sold or bartered locally, subject to congestion-driven
+% price/yield decay when many agents in the same place produce the same
+% thing).  The split is set per-layer via the `subsistence_fraction`
+% column of utility_layers_v1.csv (range 0.0 - 1.0):
+%
+%   subsistence_fraction = 1.0  -> all yield retained; no congestion
+%   subsistence_fraction = 0.0  -> all yield to market; full congestion
+%   subsistence_fraction = 0.7  -> 70% retained, 30% market-modulated
+%
+% This generalises the earlier binary is_subsistence flag (which is kept
+% as a fallback for backward compatibility -- old CSVs with 1/0 entries
+% map cleanly to fractions 1.0/0.0).
+%
+% Mixed utility formula:
+%   utility = base*sf + base*(1 - sf) * (m*nExpected) /
+%                                  (max(1, n_actual - m*nExpected)*k + m*nExpected)
+%
+% Empirically defensible starting values for Madagascar smallholder ag
+% (FAO Madagascar profile; Harvey et al. 2014 reports ~80% retention of
+% subsistence rice by surveyed households):
+%   rice_north, rice_south : 0.75
+%   maize                  : 0.65
+%   cassava                : 0.85 (drought-tolerant subsistence fallback)
+%   vanilla, industrial_crop, all urban layers : 0.0
+%
+% Setting subsistence_fraction below 1 for ag layers (rather than the old
+% binary 1) reintroduces a partial market mechanism for the saleable
+% surplus -- physically realistic, and more defensible in the methods
+% section than the all-or-nothing toggle that preceded it.
+
+if ismember('subsistence_fraction', layerDefs.Properties.VariableNames)
+    subsistenceFrac = double(layerDefs.subsistence_fraction);
+elseif ismember('is_subsistence', layerDefs.Properties.VariableNames)
+    subsistenceFrac = double(layerDefs.is_subsistence);   % legacy 0/1 -> 0.0/1.0
+else
+    subsistenceFrac = zeros(nLayers, 1);                  % default: pure market
+end
+subsistenceFrac(isnan(subsistenceFrac)) = 0;
+subsistenceFrac = max(0, min(1, subsistenceFrac));        % defensive clamp to [0, 1]
 
 utilityLayerFunctions = cell(nLayers, 1);
 for iL = 1:nLayers
-    utilityLayerFunctions{iL,1} = @(k,m,nExpected,n_actual,base) ...
-        base * (m * nExpected) / (max(1, n_actual - m * nExpected) * k + m * nExpected);
+    sf = subsistenceFrac(iL);
+    if sf >= 1.0
+        % Pure subsistence: no congestion at any agent density
+        utilityLayerFunctions{iL,1} = @(k,m,nExpected,n_actual,base) base;
+    elseif sf <= 0.0
+        % Pure market: standard density-dependent congestion formula
+        utilityLayerFunctions{iL,1} = @(k,m,nExpected,n_actual,base) ...
+            base * (m * nExpected) / (max(1, n_actual - m * nExpected) * k + m * nExpected);
+    else
+        % Mixed: sf of yield is kept (congestion-immune); (1-sf) sold to
+        % the local market (subject to standard congestion modulation).
+        utilityLayerFunctions{iL,1} = @(k,m,nExpected,n_actual,base) ...
+            base * sf + ...
+            base * (1 - sf) * (m * nExpected) / (max(1, n_actual - m * nExpected) * k + m * nExpected);
+    end
 end
+fprintf(['createUtilityLayers: subsistence_fraction by layer -- ' ...
+         'pure-subsistence(=1): %d, pure-market(=0): %d, mixed: %d ' ...
+         '(range %.2f to %.2f).\n'], ...
+        sum(subsistenceFrac >= 1.0 - eps), ...
+        sum(subsistenceFrac <= eps), ...
+        sum(subsistenceFrac > eps & subsistenceFrac < 1.0 - eps), ...
+        min(subsistenceFrac), max(subsistenceFrac));
 
 %% -----------------------------------------------------------------------
 %% 3. UTILITY HISTORY (pre-allocated; filled during simulation)
@@ -435,6 +493,17 @@ if isfield(modelParameters, 'droughtVariabilityOn') && modelParameters.droughtVa
                 end
             end
 
+            % Per-layer drought floor: the agronomic minimum yield even in
+            % extreme drought (utility_layers_v1.csv -> drought_min_yield).
+            % Previously this block clipped at 0, allowing synthetic drought
+            % years to push yield to 0% even where the crop has known
+            % drought tolerance -- an inconsistency with the observed-SPEI
+            % block (which respects the floor). Fix is to use the same
+            % per-layer floor here so synthetic and observed drought
+            % regimes are physically consistent.
+            minYld = double(layerDefs.drought_min_yield(iL));
+            if isnan(minYld); minYld = 0.0; end
+
             % Apply perturbations: drought state is shared, magnitude is layer-specific
             for iCyc = 1:nSimYears
                 for iLoc = 1:nLoc
@@ -446,7 +515,7 @@ if isfield(modelParameters, 'droughtVariabilityOn') && modelParameters.droughtVa
                         delta = 0;
                     end
                     yieldFactor(iLoc, iL, iCyc) = ...
-                        min(1.0, max(0.0, yieldFactor(iLoc, iL, iCyc) + delta));
+                        min(1.0, max(minYld, yieldFactor(iLoc, iL, iCyc) + delta));
                 end
             end
             nMarkovApplied = nMarkovApplied + 1;

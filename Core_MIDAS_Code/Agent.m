@@ -15,7 +15,18 @@ classdef Agent < handle
        TOD
        DOB
        trapped
-       
+       consecutiveFIYears   % counter of consecutive years food-insecure
+                            % (wealth_end < wealth_start). Used by variant
+                            % A (distressTriggerCode == 1) of the distress
+                            % overlay: trigger when >= distressN.
+                            % Decremented (floor 0) on non-FI years.
+       quartersBelowWealthThreshold  % counter of consecutive quarters with
+                            % wealth < distressWealthThreshold. Used by
+                            % variant B (distressTriggerCode == 2):
+                            % trigger when >= distressN_quarters.
+                            % Decremented (floor 0) on quarters above
+                            % threshold.
+
        %agent accumulated data
        network
        myIndexInNetwork
@@ -86,6 +97,8 @@ classdef Agent < handle
          A.TOD = -9999;  %TOD is 'time of death'
          A.DOB = -9999;  %DOB is 'date of birth'
          A.trapped = 0;
+         A.consecutiveFIYears = 0;
+         A.quartersBelowWealthThreshold = 0;
       end %  
       
       %as written presently, most agent actions are coded as model

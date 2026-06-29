@@ -1,6 +1,24 @@
-function [ agent, moved ] = choosePortfolio( agent, utilityVariables, currentT, modelParameters, mapParameters, demographicVariables, mapVariables )
+function [ agent, moved ] = choosePortfolio( agent, utilityVariables, currentT, modelParameters, mapParameters, demographicVariables, mapVariables, distressMode )
 %choosePortfolio.m is the main engine for agents to select an income
 %portfolio (and possibly, to move)
+%
+%distressMode (optional, default false) -- when true, the agent is being
+%routed through this function by the distress-migration overlay (see
+%midasMainLoop.m). In that case the function:
+%   (a) excludes the agent's current location from the candidate set,
+%       so the returned best location is guaranteed to be different and
+%       the agent will move (provided at least one other candidate
+%       exists);
+%   (b) skips the credit constraint check, allowing portfolios whose
+%       moving + access costs would normally push the agent past the
+%       creditMultiplier floor to remain in the candidate set. This
+%       represents the empirical reality that distress migration is
+%       typically funded by liquidating household assets (livestock,
+%       grain stores) rather than from accumulated cash savings, which
+%       MIDAS does not model explicitly.
+if nargin < 8
+    distressMode = false;
+end
 
 %function takes an agent, as well as the current timestep and a number of
 %model environment variables.  The only one of these that is written to
@@ -65,7 +83,18 @@ sortedIndex = sortedIndex(sortedLocations > 0);
 bestLocations = sortedIndex(1:min(length(sortedIndex),agent.numBestLocation));
 otherRandomLocations = find(any(agent.knowsIncomeLocation,2));
 randomLocations = otherRandomLocations(randperm(length(otherRandomLocations),min(length(otherRandomLocations),agent.numRandomLocation)));
-locationList = [currentLocation; bestLocations; randomLocations];
+if distressMode
+    % Exclude current location from candidate set so the agent is forced
+    % to move (unless there are literally no other candidates, in which
+    % case fall back to standard behaviour rather than crash).
+    locationList = [bestLocations; randomLocations];
+    locationList = locationList(locationList ~= currentLocation);
+    if isempty(locationList)
+        locationList = [currentLocation; bestLocations; randomLocations];
+    end
+else
+    locationList = [currentLocation; bestLocations; randomLocations];
+end
 
 %remove duplicates
 [bSort,iSort] = sort(locationList);
@@ -414,7 +443,12 @@ for indexL = 1:length(locationList)
         
         %this should not preclude keeping the current portfolio even if
         %agent is deeply in debt
-        if(and(currentMovingCost + newCosts > 0, agent.wealth - currentMovingCost - newCosts < modelParameters.creditMultiplier * sum(utilityVariables.utilityAccessCosts(agent.accessCodesPaid,2))))
+        %
+        %In distress mode (overlay), the credit constraint is skipped so
+        %that wealth-depleted agents can still relocate -- mimicking the
+        %asset-liquidation channel that funds real-world distress
+        %migration but is not represented explicitly in MIDAS.
+        if(~distressMode && and(currentMovingCost + newCosts > 0, agent.wealth - currentMovingCost - newCosts < modelParameters.creditMultiplier * sum(utilityVariables.utilityAccessCosts(agent.accessCodesPaid,2))))
             exceedsCreditLimit(indexP) = true;
         end
 

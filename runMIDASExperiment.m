@@ -16,7 +16,7 @@ saveDirectory = './Outputs/';
 %number of runs
 % For initial test: 20 runs. For a full calibration round: 200-500.
 % On HPC with parfor and 20 cores, 200 runs takes ~4-8 hours.
-modelRuns = 1;
+modelRuns = 5;
 
 try load updatedMCParams
 catch
