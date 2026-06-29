@@ -1,4 +1,4 @@
-function runMIDASExperiment_parallel(nWorkers, taskId, drawsPerTask, nRealisations, distressArm)
+function runMIDASExperiment_parallel(nWorkers, taskId, drawsPerTask, nRealisations, distressArm, expectationArm)
 % runMIDASExperiment_parallel  --  parfor-enabled calibration runner
 %
 % Identical to runMIDASExperiment but uses parfor instead of for.
@@ -38,14 +38,20 @@ if nargin < 2 || isempty(taskId);        taskId        = 0;   end
 if nargin < 3 || isempty(drawsPerTask);  drawsPerTask  = 200; end
 if nargin < 4 || isempty(nRealisations); nRealisations = 1;   end
 if nargin < 5 || isempty(distressArm);   distressArm   = 1;   end
+if nargin < 6 || isempty(expectationArm); expectationArm = 0;  end
 % distressArm: 1=Variant A (FI counter), 2=Variant B (wealth+duration),
 % 3=Variant C (cumulative shortfall), 4=Variant D (stochastic depth).
-% Selects which distress-migration trigger is active and what subfolder
-% of ./Outputs/ the run writes to. See checkDistressTrigger.m for the
-% per-arm trigger logic.
+% expectationArm: 0=baseline (current MIDAS), 1=adaptive expectations,
+% 2=windowed sampling, 3=naive forecast, 4=adaptive+shocks.
+% Combined they select the active trigger/expectation logic AND the
+% output subfolder. See checkDistressTrigger.m and formExpectation.m.
 if ~ismember(distressArm, [1 2 3 4])
     error('runMIDASExperiment_parallel:badArm', ...
           'distressArm must be 1, 2, 3, or 4; got %g', distressArm);
+end
+if ~ismember(expectationArm, [0 1 2 3 4])
+    error('runMIDASExperiment_parallel:badExpectationArm', ...
+          'expectationArm must be 0-4; got %g', expectationArm);
 end
 
 modelRuns = drawsPerTask * nRealisations;   % total parfor iterations
@@ -110,13 +116,22 @@ end
 outputList = {};
 series = 'MC_Run_';
 % Arm-aware output folder so concurrent arm submissions don't collide.
-% Arms 2-4 land in ./Outputs_Arm<N>/. Arm 1 stays at ./Outputs/ for
-% back-compatibility with the in-flight legacy Arm-A run that was
-% submitted before this env-var refactor; rename later if desired.
-if distressArm == 1
+% For pure-baseline (no overlay, no expectation variant) the folder is
+% ./Outputs/. Distress overlay arms 2-4 land in ./Outputs_Arm<N>/.
+% Expectation arms 1-4 (with distress disabled or default) land in
+% ./Outputs_ExpArm<N>/. If both an overlay and an expectation arm are
+% active simultaneously, the combined folder name is used.
+folderParts = {};
+if distressArm ~= 1
+    folderParts{end+1} = sprintf('Arm%d', distressArm);
+end
+if expectationArm ~= 0
+    folderParts{end+1} = sprintf('ExpArm%d', expectationArm);
+end
+if isempty(folderParts)
     saveDirectory = './Outputs/';
 else
-    saveDirectory = sprintf('./Outputs_Arm%d/', distressArm);
+    saveDirectory = ['./Outputs_' strjoin(folderParts, '_') '/'];
 end
 fprintf('[Distress overlay] Writing outputs to %s\n', saveDirectory);
 
@@ -328,6 +343,36 @@ for k = 1:size(distressParamSpecs, 1)
     end
 end
 fprintf('[Distress overlay] Running ARM %d.\n', DISTRESS_ARM);
+
+% =============================================================================
+%  EXPECTATION-FORMATION OVERLAY: arm selector + parameter safety net
+% =============================================================================
+% Selects how an agent forms expected per-period income for candidate
+% portfolios (see formExpectation.m and the dispatcher dispatched on
+% modelParameters.expectationArm). Arms:
+%   0 = BASELINE (current MIDAS: random stitching of complete past cycles)
+%   1 = ADAPTIVE EXPECTATIONS (exp-decay weighted mean, deterministic future)
+%   2 = WINDOWED RANDOM SAMPLING (baseline restricted to numPeriodsMemory)
+%   3 = NAIVE FORECAST (last cycle repeated forward)
+%   4 = ADAPTIVE + STOCHASTIC SHOCKS (weighted mean plus sampled residuals)
+expectationParamSpecs = { ...
+    %  name                                                Lower            Upper            RoundYN  applies-to-arms
+    'modelParameters.expectationArm',                       expectationArm,  expectationArm,  1,      'all';   ...
+    'modelParameters.expectationDecayRate',                 0.03,            0.20,            0,      '1,4';   ...
+    'modelParameters.expectationShockWindow',               4,               20,              1,      '4';     ...
+};
+
+for k = 1:size(expectationParamSpecs, 1)
+    pname = expectationParamSpecs{k,1};
+    if ~ismember(pname, mcParams.Name)
+        mcParams = [mcParams; {pname, expectationParamSpecs{k,2}, ...
+                                       expectationParamSpecs{k,3}, ...
+                                       expectationParamSpecs{k,4}}];
+        fprintf('[Expectation arm] Appended %s [%g, %g].\n', ...
+                pname, expectationParamSpecs{k,2}, expectationParamSpecs{k,3});
+    end
+end
+fprintf('[Expectation arm] Running ARM %d.\n', expectationArm);
 
 % Build the experimental design.
 % First draw drawsPerTask UNIQUE parameter sets, then replicate each into

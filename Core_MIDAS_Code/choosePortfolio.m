@@ -242,29 +242,22 @@ for indexL = 1:length(locationList)
     %make a blank array to hold the estimated time paths for each layer,
     %and reshape our fullHistory array to be the same 2D shape
     numUniqueLayers = size(utilityVariables.utilityHistory,2);
-    portfolioData = NaN * ones(numUniqueLayers,agent.numPeriodsEvaluate); %Need to adjust to portfolios of different lengths?
     fullHistory = reshape(fullHistory,numUniqueLayers,currentT);
-    
-    %our evaluation period starts in the next timestep, so find points in
-    %the data history that are the same part of the cycle (and are complete
-    %cycles), for a first pass fill-in of our evaluation data
-    startingPoints = currentT+1:-modelParameters.cycleLength:1;
-    startingPoints(1) = []; %isn't a complete cycle
-    startingPoints(startingPoints < modelParameters.cycleLength) = [];
-    %first pass at filling in evaluation period, drawing cycles randomly
-    if(~isempty(startingPoints))
-        startSamples = startingPoints(ceil(rand(completeCycles,1) * length(startingPoints)));
-        for indexI = 1:length(startSamples)
-            
-            portfolioData(:,(indexI-1)*modelParameters.cycleLength+1:indexI*modelParameters.cycleLength) = fullHistory(:, startSamples(indexI):startSamples(indexI)+modelParameters.cycleLength-1);
-            
-        end
 
-        if(extraPeriods > 0)
-            endSample = startingPoints(ceil(rand() * length(startingPoints)));
-            portfolioData(:,(end-extraPeriods+1):end) = fullHistory(:, (endSample+1):endSample+extraPeriods);
-        end
-
+    % --- Expectation formation (dispatched by modelParameters.expectationArm)
+    % The original MIDAS behaviour (random stitching of complete past
+    % cycles, uniformly sampled across the full agent history) is
+    % preserved as arm 0 inside formExpectation.m. Arms 1-4 implement
+    % behaviourally-grounded alternatives that weight recent history
+    % more heavily and/or anchor the expectation to current conditions
+    % rather than randomly-sampled past years. See formExpectation.m
+    % for the per-arm logic.
+    portfolioData = formExpectation(fullHistory, currentT, agent, modelParameters);
+    if isempty(portfolioData) || all(isnan(portfolioData(:)))
+        % Belt-and-braces: if formExpectation returned no usable
+        % expectations, fall back to an all-NaN array for the
+        % blank-fill logic below to populate.
+        portfolioData = NaN * ones(numUniqueLayers, agent.numPeriodsEvaluate);
     end
     %now go through and fill in the blanks, trying to preserve sequence if
     %possible; and capturing as many layers per sample as possible.  we do

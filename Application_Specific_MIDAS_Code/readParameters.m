@@ -129,8 +129,26 @@ modelParameters.droughtScaleFactor   = 0.10;
 %   3 = Variant C: cumulative wealth shortfall over rolling window
 %   4 = Variant D: stochastic depth-dependent (per-quarter draw)
 % See checkDistressTrigger.m for the dispatch logic.
-modelParameters.distressMigrationEnabled = true;
-modelParameters.distressTriggerCode = 1;   % default to Variant A
+modelParameters.distressMigrationEnabled = false;
+modelParameters.distressTriggerCode = 1;   % default to Variant A (unused when distressMigrationEnabled = false)
+
+% ----- Expectation-formation arm (see paper Section 4.4 discussion) ---------
+% Selects how an agent forms expected per-period income for a candidate
+% portfolio in choosePortfolio.m. Dispatched in formExpectation.m:
+%   0 = BASELINE (current MIDAS: random stitching of complete past cycles
+%       uniformly sampled across the full agent history)
+%   1 = ADAPTIVE EXPECTATIONS (exp-decay weighted mean, deterministic future)
+%   2 = WINDOWED RANDOM SAMPLING (baseline logic but restricted to the most
+%       recent numPeriodsMemory quarters; activates that previously-dead param)
+%   3 = NAIVE FORECAST (most recent complete cycle repeated forward)
+%   4 = ADAPTIVE + STOCHASTIC SHOCKS (weighted mean plus residuals sampled
+%       from observations within expectationShockWindow quarters)
+% Default 0 preserves back-compatibility with all calibration runs to date.
+modelParameters.expectationArm = 0;
+
+% Per-variant parameters (sampled in mcParams when their arm is active).
+modelParameters.expectationDecayRate    = 0.05;   % lambda for arms 1 and 4; half-life of ln(2)/lambda quarters (~14 q at 0.05)
+modelParameters.expectationShockWindow  = 12;     % quarters of recent observations to pool for arm 4 residuals (3 years)
 
 % Variant A parameters
 modelParameters.distressN = 3;   % consecutive FI years to trigger (Variant A)
