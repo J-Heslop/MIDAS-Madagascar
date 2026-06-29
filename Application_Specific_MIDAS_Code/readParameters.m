@@ -113,6 +113,57 @@ modelParameters.speiFile = ['./Data/CEDA_SPEI_' modelParameters.sspScenario '.cs
 modelParameters.droughtVariabilityOn = false;
 modelParameters.droughtMarkovFile    = './Data/drought_markov_params.csv';
 modelParameters.droughtScaleFactor   = 0.10;
+
+% ----- Distress-migration overlay (see paper Sections 4.4 / 5.1) -----------
+% When enabled, agents flagged by checkDistressTrigger are forced to
+% migrate at the next quarterly cycle, regardless of the standard pChoose
+% probabilistic trigger. choosePortfolio is still used to pick the
+% destination, but the current location is excluded from the candidate
+% set (to force a move) and the credit constraint is relaxed (to allow
+% the move to proceed even when wealth is depleted, mimicking household
+% asset liquidation to fund displacement). Default: disabled.
+%
+% Four trigger variants are dispatched via distressTriggerCode:
+%   1 = Variant A: consecutive food-insecure years
+%   2 = Variant B: wealth threshold + duration
+%   3 = Variant C: cumulative wealth shortfall over rolling window
+%   4 = Variant D: stochastic depth-dependent (per-quarter draw)
+% See checkDistressTrigger.m for the dispatch logic.
+modelParameters.distressMigrationEnabled = false;
+modelParameters.distressTriggerCode = 1;   % default to Variant A (unused when distressMigrationEnabled = false)
+
+% ----- Expectation-formation arm (see paper Section 4.4 discussion) ---------
+% Selects how an agent forms expected per-period income for a candidate
+% portfolio in choosePortfolio.m. Dispatched in formExpectation.m:
+%   0 = BASELINE (current MIDAS: random stitching of complete past cycles
+%       uniformly sampled across the full agent history)
+%   1 = ADAPTIVE EXPECTATIONS (exp-decay weighted mean, deterministic future)
+%   2 = WINDOWED RANDOM SAMPLING (baseline logic but restricted to the most
+%       recent numPeriodsMemory quarters; activates that previously-dead param)
+%   3 = NAIVE FORECAST (most recent complete cycle repeated forward)
+%   4 = ADAPTIVE + STOCHASTIC SHOCKS (weighted mean plus residuals sampled
+%       from observations within expectationShockWindow quarters)
+% Default 0 preserves back-compatibility with all calibration runs to date.
+modelParameters.expectationArm = 0;
+
+% Per-variant parameters (sampled in mcParams when their arm is active).
+modelParameters.expectationDecayRate    = 0.05;   % lambda for arms 1 and 4; half-life of ln(2)/lambda quarters (~14 q at 0.05)
+modelParameters.expectationShockWindow  = 12;     % quarters of recent observations to pool for arm 4 residuals (3 years)
+
+% Variant A parameters
+modelParameters.distressN = 3;   % consecutive FI years to trigger (Variant A)
+
+% Variant B parameters (also reused by C and D for the threshold)
+modelParameters.distressWealthThreshold = 0.5;   % wealth value below which an agent is "in distress" (units: same as agent.wealth; subsistence_costs default = 0.3/quarter, so 0.5 = ~1.5 quarters of subsistence buffer)
+modelParameters.distressN_quarters = 8;          % consecutive quarters below threshold to trigger (Variant B; 8 = 2 years)
+
+% Variant C parameters
+modelParameters.distressShortfallWindowYears = 3;     % rolling window for shortfall accumulation (Variant C)
+modelParameters.distressCriticalShortfall    = 2.0;   % cumulative shortfall sum across the window to trigger (units: wealth-quarters)
+
+% Variant D parameters
+modelParameters.distressStochasticAlpha = 3.0;   % steepness of depth-to-probability response (Variant D; higher = more responsive to shortfall depth)
+
 modelParameters.saveImg = true;
 modelParameters.shortName = 'Mada_toy_application';
 agentParameters.currentID = 1;

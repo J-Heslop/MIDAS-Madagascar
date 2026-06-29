@@ -74,7 +74,7 @@ fprintf('SLURM_ARRAY_TASK_ID = %d (of %d tasks)\n', arrayId, arrayCnt);
 % Edit both numbers here when changing the campaign size, and update
 % --array=1-N%K in submit_calibration.sh accordingly.
 numTotalDraws = 1000;
-nRealisations = 3;
+nRealisations = 1;
 
 if arrayId == 0
     drawsPerTask = numTotalDraws;
@@ -91,8 +91,36 @@ if exist('runMIDASExperiment_parallel.m', 'file') ~= 2
           'runMIDASExperiment_parallel.m not found in %s', pwd);
 end
 
+% ----- Distress overlay arm (1-4) -----
+% Selects which trigger variant runMIDASExperiment_parallel uses and
+% which output folder it writes to. Override by setting DISTRESS_ARM
+% in the SLURM submission environment, e.g.:
+%     sbatch --export=ALL,DISTRESS_ARM=2 HPC/submit_calibration_batch.sh
+% Defaults to 1 (Variant A) if unset.
+distressArm = str2double(getenv('DISTRESS_ARM'));
+if isnan(distressArm) || ~ismember(distressArm, [1 2 3 4])
+    distressArm = 1;
+    fprintf('DISTRESS_ARM env var unset or invalid; defaulting to Arm 1 (Variant A).\n');
+else
+    fprintf('DISTRESS_ARM env var = %d (passed through to runner).\n', distressArm);
+end
+
+% ----- Expectation-formation arm (0-4) -----
+% Selects which expectation mechanism formExpectation uses (see
+% formExpectation.m). Override with EXPECTATION_ARM in the SLURM
+% submission environment, e.g.:
+%   sbatch --export=ALL,EXPECTATION_ARM=1 HPC/submit_calibration_batch.sh
+% Defaults to 0 (baseline MIDAS sampling) if unset.
+expectationArm = str2double(getenv('EXPECTATION_ARM'));
+if isnan(expectationArm) || ~ismember(expectationArm, [0 1 2 3 4])
+    expectationArm = 0;
+    fprintf('EXPECTATION_ARM env var unset or invalid; defaulting to 0 (baseline).\n');
+else
+    fprintf('EXPECTATION_ARM env var = %d (passed through to runner).\n', expectationArm);
+end
+
 % ----- Run -----
 % addpath / parpool / RNG seeding are handled inside runMIDASExperiment_parallel.
-runMIDASExperiment_parallel(nWorkers, arrayId, drawsPerTask, nRealisations);
+runMIDASExperiment_parallel(nWorkers, arrayId, drawsPerTask, nRealisations, distressArm, expectationArm);
 
 fprintf('=== run_calibration.m completed at %s ===\n', datestr(now));

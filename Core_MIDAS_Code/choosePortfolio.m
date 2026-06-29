@@ -1,6 +1,24 @@
-function [ agent, moved ] = choosePortfolio( agent, utilityVariables, currentT, modelParameters, mapParameters, demographicVariables, mapVariables )
+function [ agent, moved ] = choosePortfolio( agent, utilityVariables, currentT, modelParameters, mapParameters, demographicVariables, mapVariables, distressMode )
 %choosePortfolio.m is the main engine for agents to select an income
 %portfolio (and possibly, to move)
+%
+%distressMode (optional, default false) -- when true, the agent is being
+%routed through this function by the distress-migration overlay (see
+%midasMainLoop.m). In that case the function:
+%   (a) excludes the agent's current location from the candidate set,
+%       so the returned best location is guaranteed to be different and
+%       the agent will move (provided at least one other candidate
+%       exists);
+%   (b) skips the credit constraint check, allowing portfolios whose
+%       moving + access costs would normally push the agent past the
+%       creditMultiplier floor to remain in the candidate set. This
+%       represents the empirical reality that distress migration is
+%       typically funded by liquidating household assets (livestock,
+%       grain stores) rather than from accumulated cash savings, which
+%       MIDAS does not model explicitly.
+if nargin < 8
+    distressMode = false;
+end
 
 %function takes an agent, as well as the current timestep and a number of
 %model environment variables.  The only one of these that is written to
@@ -65,7 +83,18 @@ sortedIndex = sortedIndex(sortedLocations > 0);
 bestLocations = sortedIndex(1:min(length(sortedIndex),agent.numBestLocation));
 otherRandomLocations = find(any(agent.knowsIncomeLocation,2));
 randomLocations = otherRandomLocations(randperm(length(otherRandomLocations),min(length(otherRandomLocations),agent.numRandomLocation)));
-locationList = [currentLocation; bestLocations; randomLocations];
+if distressMode
+    % Exclude current location from candidate set so the agent is forced
+    % to move (unless there are literally no other candidates, in which
+    % case fall back to standard behaviour rather than crash).
+    locationList = [bestLocations; randomLocations];
+    locationList = locationList(locationList ~= currentLocation);
+    if isempty(locationList)
+        locationList = [currentLocation; bestLocations; randomLocations];
+    end
+else
+    locationList = [currentLocation; bestLocations; randomLocations];
+end
 
 %remove duplicates
 [bSort,iSort] = sort(locationList);
@@ -213,29 +242,22 @@ for indexL = 1:length(locationList)
     %make a blank array to hold the estimated time paths for each layer,
     %and reshape our fullHistory array to be the same 2D shape
     numUniqueLayers = size(utilityVariables.utilityHistory,2);
-    portfolioData = NaN * ones(numUniqueLayers,agent.numPeriodsEvaluate); %Need to adjust to portfolios of different lengths?
     fullHistory = reshape(fullHistory,numUniqueLayers,currentT);
-    
-    %our evaluation period starts in the next timestep, so find points in
-    %the data history that are the same part of the cycle (and are complete
-    %cycles), for a first pass fill-in of our evaluation data
-    startingPoints = currentT+1:-modelParameters.cycleLength:1;
-    startingPoints(1) = []; %isn't a complete cycle
-    startingPoints(startingPoints < modelParameters.cycleLength) = [];
-    %first pass at filling in evaluation period, drawing cycles randomly
-    if(~isempty(startingPoints))
-        startSamples = startingPoints(ceil(rand(completeCycles,1) * length(startingPoints)));
-        for indexI = 1:length(startSamples)
-            
-            portfolioData(:,(indexI-1)*modelParameters.cycleLength+1:indexI*modelParameters.cycleLength) = fullHistory(:, startSamples(indexI):startSamples(indexI)+modelParameters.cycleLength-1);
-            
-        end
 
-        if(extraPeriods > 0)
-            endSample = startingPoints(ceil(rand() * length(startingPoints)));
-            portfolioData(:,(end-extraPeriods+1):end) = fullHistory(:, (endSample+1):endSample+extraPeriods);
-        end
-
+    % --- Expectation formation (dispatched by modelParameters.expectationArm)
+    % The original MIDAS behaviour (random stitching of complete past
+    % cycles, uniformly sampled across the full agent history) is
+    % preserved as arm 0 inside formExpectation.m. Arms 1-4 implement
+    % behaviourally-grounded alternatives that weight recent history
+    % more heavily and/or anchor the expectation to current conditions
+    % rather than randomly-sampled past years. See formExpectation.m
+    % for the per-arm logic.
+    portfolioData = formExpectation(fullHistory, currentT, agent, modelParameters);
+    if isempty(portfolioData) || all(isnan(portfolioData(:)))
+        % Belt-and-braces: if formExpectation returned no usable
+        % expectations, fall back to an all-NaN array for the
+        % blank-fill logic below to populate.
+        portfolioData = NaN * ones(numUniqueLayers, agent.numPeriodsEvaluate);
     end
     %now go through and fill in the blanks, trying to preserve sequence if
     %possible; and capturing as many layers per sample as possible.  we do
@@ -414,7 +436,12 @@ for indexL = 1:length(locationList)
         
         %this should not preclude keeping the current portfolio even if
         %agent is deeply in debt
-        if(and(currentMovingCost + newCosts > 0, agent.wealth - currentMovingCost - newCosts < modelParameters.creditMultiplier * sum(utilityVariables.utilityAccessCosts(agent.accessCodesPaid,2))))
+        %
+        %In distress mode (overlay), the credit constraint is skipped so
+        %that wealth-depleted agents can still relocate -- mimicking the
+        %asset-liquidation channel that funds real-world distress
+        %migration but is not represented explicitly in MIDAS.
+        if(~distressMode && and(currentMovingCost + newCosts > 0, agent.wealth - currentMovingCost - newCosts < modelParameters.creditMultiplier * sum(utilityVariables.utilityAccessCosts(agent.accessCodesPaid,2))))
             exceedsCreditLimit(indexP) = true;
         end
 

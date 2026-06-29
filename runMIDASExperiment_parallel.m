@@ -1,4 +1,4 @@
-function runMIDASExperiment_parallel(nWorkers, taskId, drawsPerTask, nRealisations)
+function runMIDASExperiment_parallel(nWorkers, taskId, drawsPerTask, nRealisations, distressArm, expectationArm)
 % runMIDASExperiment_parallel  --  parfor-enabled calibration runner
 %
 % Identical to runMIDASExperiment but uses parfor instead of for.
@@ -37,6 +37,22 @@ if nargin < 1 || isempty(nWorkers);      nWorkers      = 20;  end
 if nargin < 2 || isempty(taskId);        taskId        = 0;   end
 if nargin < 3 || isempty(drawsPerTask);  drawsPerTask  = 200; end
 if nargin < 4 || isempty(nRealisations); nRealisations = 1;   end
+if nargin < 5 || isempty(distressArm);   distressArm   = 1;   end
+if nargin < 6 || isempty(expectationArm); expectationArm = 0;  end
+% distressArm: 1=Variant A (FI counter), 2=Variant B (wealth+duration),
+% 3=Variant C (cumulative shortfall), 4=Variant D (stochastic depth).
+% expectationArm: 0=baseline (current MIDAS), 1=adaptive expectations,
+% 2=windowed sampling, 3=naive forecast, 4=adaptive+shocks.
+% Combined they select the active trigger/expectation logic AND the
+% output subfolder. See checkDistressTrigger.m and formExpectation.m.
+if ~ismember(distressArm, [1 2 3 4])
+    error('runMIDASExperiment_parallel:badArm', ...
+          'distressArm must be 1, 2, 3, or 4; got %g', distressArm);
+end
+if ~ismember(expectationArm, [0 1 2 3 4])
+    error('runMIDASExperiment_parallel:badExpectationArm', ...
+          'expectationArm must be 0-4; got %g', expectationArm);
+end
 
 modelRuns = drawsPerTask * nRealisations;   % total parfor iterations
 
@@ -99,7 +115,25 @@ end
 
 outputList = {};
 series = 'MC_Run_';
-saveDirectory = './Outputs/';
+% Arm-aware output folder so concurrent arm submissions don't collide.
+% For pure-baseline (no overlay, no expectation variant) the folder is
+% ./Outputs/. Distress overlay arms 2-4 land in ./Outputs_Arm<N>/.
+% Expectation arms 1-4 (with distress disabled or default) land in
+% ./Outputs_ExpArm<N>/. If both an overlay and an expectation arm are
+% active simultaneously, the combined folder name is used.
+folderParts = {};
+if distressArm ~= 1
+    folderParts{end+1} = sprintf('Arm%d', distressArm);
+end
+if expectationArm ~= 0
+    folderParts{end+1} = sprintf('ExpArm%d', expectationArm);
+end
+if isempty(folderParts)
+    saveDirectory = './Outputs/';
+else
+    saveDirectory = ['./Outputs_' strjoin(folderParts, '_') '/'];
+end
+fprintf('[Distress overlay] Writing outputs to %s\n', saveDirectory);
 
 % Ensure output directory exists
 if ~exist(saveDirectory, 'dir')
@@ -119,12 +153,37 @@ fprintf('Runs this task: %d draws x %d realisations = %d total iterations.\n', .
 % the full wide-prior parameter table from scratch. The explicit log lines
 % below make the mode unambiguous in the .out file -- a round that was meant
 % to use narrowed bounds but prints "FRESH WIDE priors" means
-% updatedMCParams.mat was missing from the run directory (silent fallback),
-% which previously went unnoticed and caused a round to re-explore the full
-% prior space instead of the narrowed one.
+% updatedMCParams.mat was missing from every searched location (silent
+% fallback), which previously went unnoticed and caused a round to
+% re-explore the full prior space instead of the narrowed one.
+%
+% Search order (first match wins):
+%   1. ./Calibration Testing/updatedMCParams.mat
+%      (where buildNextRound.m writes it by default, so the file lands
+%       in the right place without a manual move)
+%   2. ./updatedMCParams.mat
+%      (legacy location at the MIDAS project root, kept for backward
+%       compatibility with older workflows that staged the file there)
+searchPaths = { ...
+    fullfile('Calibration Testing', 'updatedMCParams.mat'), ...
+    'updatedMCParams.mat' };
+foundPath = '';
+for kPath = 1:numel(searchPaths)
+    if exist(searchPaths{kPath}, 'file') == 2
+        foundPath = searchPaths{kPath};
+        break;
+    end
+end
+
 try
-    load updatedMCParams
-    fprintf('Loaded NARROWED bounds from updatedMCParams.mat (%d parameters).\n', height(mcParams));
+    if isempty(foundPath)
+        error('runMIDASExperiment:noUpdatedMCParams', ...
+              'updatedMCParams.mat not found in any of: %s', strjoin(searchPaths, ' | '));
+    end
+    loaded = load(foundPath);
+    mcParams = loaded.mcParams;
+    fprintf('Loaded NARROWED bounds from %s (%d parameters).\n', ...
+            foundPath, height(mcParams));
 catch
 
     fprintf('No updatedMCParams.mat found -- building FRESH WIDE priors.\n');
@@ -234,7 +293,86 @@ catch
     % is what drives future scenarios. Bracket 0.05-0.40 covers weak
     % to strong drought sensitivity around the previous hard-coded 0.10.
     mcParams = [mcParams; {'modelParameters.droughtScaleFactor', 0.05, 0.40, 0}];
+
+    % Distress-migration overlay (see paper Sections 4.4 / 5.1).
+    % distressMigrationEnabled is a feature flag, not a calibrated parameter:
+    % set it to 1 here when running the A/B overlay calibration and to 0
+    % (the readParameters.m default) when running the baseline.
+    % distressN is the consecutive-FI-year threshold; calibrate 1-4.
+    % NB: the distress overlay parameters are appended after the catch
+    % block by the safety net below, so they are added even when this
+    % branch is skipped (loaded narrowed mcParams).
 end
+
+% =============================================================================
+%  DISTRESS-MIGRATION OVERLAY: arm selector + parameter safety net
+% =============================================================================
+% The overlay is dispatched on modelParameters.distressTriggerCode:
+%   1 = Variant A (consecutive FI years)
+%   2 = Variant B (wealth threshold + duration)
+%   3 = Variant C (cumulative wealth shortfall over rolling window)
+%   4 = Variant D (stochastic depth-dependent)
+%
+% The arm is passed in via the 5th function argument (distressArm),
+% which is forwarded from run_calibration.m -> SLURM env var
+% DISTRESS_ARM. Per-variant parameters are sampled from the ranges
+% given in the append loop; unused parameters (e.g. distressN for
+% arms 2/3/4) just sit harmlessly in the parameter table.
+DISTRESS_ARM = distressArm;
+
+distressParamSpecs = { ...
+    %  name                                                Lower  Upper  RoundYN  applies-to-arms
+    'modelParameters.distressMigrationEnabled',             1,     1,     1,      'all';   ...
+    'modelParameters.distressTriggerCode',                  DISTRESS_ARM, DISTRESS_ARM, 1,  'all';  ...
+    'modelParameters.distressN',                            1,     4,     1,      'A';     ...
+    'modelParameters.distressWealthThreshold',              0,     5,     0,      'B,C,D'; ...
+    'modelParameters.distressN_quarters',                   2,     12,    1,      'B';     ...
+    'modelParameters.distressShortfallWindowYears',         2,     5,     1,      'C';     ...
+    'modelParameters.distressCriticalShortfall',            0.5,   10,    0,      'C';     ...
+    'modelParameters.distressStochasticAlpha',              1,     10,    0,      'D';     ...
+};
+
+for k = 1:size(distressParamSpecs, 1)
+    pname = distressParamSpecs{k,1};
+    if ~ismember(pname, mcParams.Name)
+        mcParams = [mcParams; {pname, distressParamSpecs{k,2}, ...
+                                       distressParamSpecs{k,3}, ...
+                                       distressParamSpecs{k,4}}];
+        fprintf('[Distress overlay] Appended %s [%g, %g].\n', ...
+                pname, distressParamSpecs{k,2}, distressParamSpecs{k,3});
+    end
+end
+fprintf('[Distress overlay] Running ARM %d.\n', DISTRESS_ARM);
+
+% =============================================================================
+%  EXPECTATION-FORMATION OVERLAY: arm selector + parameter safety net
+% =============================================================================
+% Selects how an agent forms expected per-period income for candidate
+% portfolios (see formExpectation.m and the dispatcher dispatched on
+% modelParameters.expectationArm). Arms:
+%   0 = BASELINE (current MIDAS: random stitching of complete past cycles)
+%   1 = ADAPTIVE EXPECTATIONS (exp-decay weighted mean, deterministic future)
+%   2 = WINDOWED RANDOM SAMPLING (baseline restricted to numPeriodsMemory)
+%   3 = NAIVE FORECAST (last cycle repeated forward)
+%   4 = ADAPTIVE + STOCHASTIC SHOCKS (weighted mean plus sampled residuals)
+expectationParamSpecs = { ...
+    %  name                                                Lower            Upper            RoundYN  applies-to-arms
+    'modelParameters.expectationArm',                       expectationArm,  expectationArm,  1,      'all';   ...
+    'modelParameters.expectationDecayRate',                 0.03,            0.20,            0,      '1,4';   ...
+    'modelParameters.expectationShockWindow',               4,               20,              1,      '4';     ...
+};
+
+for k = 1:size(expectationParamSpecs, 1)
+    pname = expectationParamSpecs{k,1};
+    if ~ismember(pname, mcParams.Name)
+        mcParams = [mcParams; {pname, expectationParamSpecs{k,2}, ...
+                                       expectationParamSpecs{k,3}, ...
+                                       expectationParamSpecs{k,4}}];
+        fprintf('[Expectation arm] Appended %s [%g, %g].\n', ...
+                pname, expectationParamSpecs{k,2}, expectationParamSpecs{k,3});
+    end
+end
+fprintf('[Expectation arm] Running ARM %d.\n', expectationArm);
 
 % Build the experimental design.
 % First draw drawsPerTask UNIQUE parameter sets, then replicate each into
