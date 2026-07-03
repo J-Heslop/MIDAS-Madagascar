@@ -1,4 +1,4 @@
-function [ utilityLayerFunctions, utilityHistory, utilityAccessCosts, utilityTimeConstraints, utilityDuration, utilityAccessCodesMat, utilityPrereqs, utilityBaseLayers, utilityForms, incomeForms, nExpected, hardSlotCountYN, localOnly ] = createUtilityLayers(locations, modelParameters, demographicVariables )
+function [ utilityLayerFunctions, utilityHistory, utilityAccessCosts, utilityTimeConstraints, utilityDuration, utilityAccessCodesMat, utilityPrereqs, utilityBaseLayers, utilityForms, incomeForms, nExpected, hardSlotCountYN, localOnly, nExpectedFrac, spatiallyRestricted ] = createUtilityLayers(locations, modelParameters, demographicVariables )
 %createUtilityLayers builds all utility layer arrays from a CSV definition file.
 %
 % The CSV path is set by modelParameters.utilityLayersFile.
@@ -315,6 +315,25 @@ if exist(obsSpeiFile, 'file') && isfield(modelParameters, 'droughtScaleFactor')
             speiPerLoc = zeros(nLoc, 1);
             speiPerLoc(validObsLoc) = speiVals(locToObsRow(validObsLoc));
 
+            % Positive-SPEI scaling (experimental lever; default 1 = legacy).
+            % The chain audit (2026-07) showed post-kere years carry a +4.6%
+            % ABOVE-trend income rebound: recovery-year positive SPEI lifts
+            % yields above the low GRMA baselines toward the 1.0 cap. That
+            % boom pulls backward-looking agents back into southern ag just
+            % when the lagged migration response would occur. Empirically,
+            % post-kere recovery is slow (households have liquidated
+            % livestock/seed stock), i.e. the income process is ASYMMETRIC.
+            % droughtPositiveSPEIScale in [0, 1] scales only the positive
+            % perturbations: 1 = symmetric (legacy), 0 = droughts subtract
+            % but good years never lift yields above the GRMA baseline --
+            % a one-parameter proxy for asset-recovery asymmetry, pending
+            % an explicit livestock/grain-store module.
+            if isfield(modelParameters, 'droughtPositiveSPEIScale') && ...
+               modelParameters.droughtPositiveSPEIScale < 1
+                posMask = speiPerLoc > 0;
+                speiPerLoc(posMask) = modelParameters.droughtPositiveSPEIScale * speiPerLoc(posMask);
+            end
+
             currYF = yieldFactor(:, iL, iCyc);
             currYF = currYF + modelParameters.droughtScaleFactor * speiPerLoc;
             currYF = max(minYld, min(1.0, currYF));
@@ -590,6 +609,52 @@ for iL = 1:nLayers
     end
 end
 
+% --- Local demand coupling (kappa) ---------------------------------------
+% In agriculture-dependent regions, local non-farm income (wage labour,
+% petty trade) co-moves with the agricultural economy: when harvests fail,
+% the demand that pays for non-farm work collapses too. The baseline model
+% instead offers drought-IMMUNE non-farm layers everywhere, which the chain
+% audit (2026-07) showed act as a local shock absorber: drought pushes
+% agents into unskilled layers in-region instead of into migration.
+%
+% When modelParameters.localDemandCoupling (kappa, in [0, 1]) is > 0, every
+% layer WITHOUT a grma_crop has its base utility scaled per location-year by
+%
+%   couplingFactor = 1 - kappa * (1 - agYF)
+%
+% where agYF is the mean drought yield factor across the ag layers actually
+% available at that location (spatial restrictions respected). kappa = 0
+% (default) reproduces legacy behaviour; kappa = 1 makes local non-farm
+% income fully proportional to the local agricultural economy.
+kappa = 0;
+if isfield(modelParameters, 'localDemandCoupling')
+    kappa = modelParameters.localDemandCoupling;
+end
+if kappa > 0 && ~isempty(grmaLayerIdx)
+    nonAgIdx = setdiff(1:nLayers, grmaLayerIdx(:)');
+    for iCyc = 1:nSimYears
+        agYF = ones(nLoc, 1);
+        for iLoc = 1:nLoc
+            availAg = grmaLayerIdx(~spatiallyRestricted(iLoc, grmaLayerIdx));
+            if ~isempty(availAg)
+                agYF(iLoc) = mean(yieldFactor(iLoc, availAg, iCyc));
+            end
+        end
+        couplingFactor = 1 - kappa * (1 - agYF);   % (nLoc x 1), in [1-kappa, 1]
+        tStart = leadTime + (iCyc - 1) * modelParameters.cycleLength + 1;
+        for iQ = 1:modelParameters.cycleLength
+            utilityBaseLayers(:, nonAgIdx, tStart + iQ - 1) = ...
+                utilityBaseLayers(:, nonAgIdx, tStart + iQ - 1) .* couplingFactor;
+        end
+    end
+    % Refresh the spinup period so it mirrors the (coupled) first cycle.
+    for iT = leadTime:-1:1
+        utilityBaseLayers(:,:,iT) = utilityBaseLayers(:,:,iT + modelParameters.cycleLength);
+    end
+    fprintf('createUtilityLayers: local demand coupling applied (kappa = %.2f) to %d non-ag layer(s).\n', ...
+            kappa, numel(nonAgIdx));
+end
+
 %% -----------------------------------------------------------------------
 %% 6. ACCESS COSTS
 %% -----------------------------------------------------------------------
@@ -627,6 +692,12 @@ end
 locationProb        = demographicVariables.locationLikelihood;
 locationProb(2:end) = locationProb(2:end) - locationProb(1:end-1);
 numAgentsModel      = locationProb * modelParameters.numAgents;
+
+% Exported so midasMainLoop.m can recompute nExpected from the CURRENT
+% regional population each timestep when modelParameters.dynamicNExpected
+% is enabled (constant-fraction semantics: capacity = frac x population,
+% rather than an absolute count frozen at the initial population).
+nExpectedFrac = double(layerDefs.nExpected_frac);   % (nLayers x 1)
 
 nExpected = zeros(nLoc, nLayers);
 for iL = 1:nLayers

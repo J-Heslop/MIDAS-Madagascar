@@ -72,6 +72,31 @@ for indexT = 1:modelParameters.timeSteps
     tIdx = min( max(1, round(currentYear) - modelParameters.startYear + 1), ...
                 size(demographicVariables.survivalRate, 4) );
 
+    % --- Dynamic layer capacity (nExpected) ------------------------------
+    % nExpected_frac is defined as the FRACTION of the local population a
+    % layer can absorb, but the original implementation froze the absolute
+    % capacity at the initial (1985) population. With ~3x population
+    % growth over the calibration period (and more by 2085), that anchors
+    % every market layer into mechanically deepening congestion decay,
+    % manufacturing a secular income decline and migration trend unrelated
+    % to climate -- and one that differs between SSP scenarios purely
+    % through their population paths. When modelParameters.dynamicNExpected
+    % is true, capacity is recomputed each timestep from the CURRENT
+    % regional agent population, preserving constant-fraction semantics.
+    % Spatially restricted (location, layer) pairs keep capacity 0, and the
+    % prerequisite-chain adjustment mirrors createUtilityLayers.m section 10.
+    % Set the flag false to reproduce legacy (static-capacity) runs.
+    if isfield(modelParameters, 'dynamicNExpected') && modelParameters.dynamicNExpected
+        locCounts = accumarray(agentLocations(aliveList)', 1, [numLocations 1]);
+        newNExpected = floor(locCounts * utilityVariables.nExpectedFrac');   % (nLoc x nLayers)
+        newNExpected(utilityVariables.spatiallyRestricted) = 0;
+        tempNExpected = zeros(size(newNExpected));
+        for indexL = 1:numLayers
+            tempNExpected(:, indexL) = sum(newNExpected(:, utilityVariables.utilityPrereqs(:, indexL) > 0), 2);
+        end
+        utilityVariables.nExpected = tempNExpected;
+    end
+
     %update the social network links ... cap any that swelled above 1 in
     %the last loop, and allow all to decay to no less than 0
     mapVariables.network(mapVariables.network ~= 0) = min(1,mapVariables.network(mapVariables.network ~= 0));
@@ -304,6 +329,10 @@ for indexT = 1:modelParameters.timeSteps
                     distressMigrations(moved(1), indexT) = distressMigrations(moved(1), indexT) + 1;
                     currentAgent.consecutiveFIYears = 0;
                     currentAgent.quartersBelowWealthThreshold = 0;
+                    % Timestamp for the Variant E re-fire cooldown (see
+                    % checkDistressTrigger.m case 5). Set for all variants;
+                    % only variant E reads it.
+                    currentAgent.lastDistressMoveT = indexT;
                 end
             end
 

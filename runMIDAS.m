@@ -5,7 +5,6 @@ clear classes
 
 addpath('./Core_MIDAS_Code');
 addpath('./Application_Specific_MIDAS_Code');
-%addpath('./Override_Core_MIDAS_Code');
 
 rng('shuffle');
 
@@ -30,8 +29,6 @@ currentFile = strrep(currentFile,':','-');
 currentFile = strrep(currentFile,' ','_');
 
 saveToFile(input, output, currentFile);
-
-
 
 end
 

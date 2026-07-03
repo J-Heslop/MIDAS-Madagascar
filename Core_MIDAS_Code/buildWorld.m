@@ -37,7 +37,7 @@ demographicVariables.ageDiscountRateFactor = ageDiscountRateFactor;
 %they experienced or learned.  This structure allows an arbitrarily large
 %landscape with an arbitrarily large number of agents, without wasting
 %memory
-[utilityLayerFunctions, utilityHistory, utilityAccessCosts, utilityTimeConstraints, utilityDuration, utilityAccessCodesMat, utilityPrereqs, utilityBaseLayers, utilityForms, incomeForms, nExpected, hardSlotCountYN, localOnly] = createUtilityLayers(locations, modelParameters, demographicVariables);
+[utilityLayerFunctions, utilityHistory, utilityAccessCosts, utilityTimeConstraints, utilityDuration, utilityAccessCodesMat, utilityPrereqs, utilityBaseLayers, utilityForms, incomeForms, nExpected, hardSlotCountYN, localOnly, nExpectedFrac, spatiallyRestricted] = createUtilityLayers(locations, modelParameters, demographicVariables);
 utilityVariables.numForms = max(utilityForms);
 utilityVariables.utilityLayerFunctions = utilityLayerFunctions;
 utilityVariables.utilityHistory = utilityHistory;
@@ -50,6 +50,8 @@ utilityVariables.utilityForms = utilityForms;
 utilityVariables.incomeForms = incomeForms;
 utilityVariables.utilityPrereqs = utilityPrereqs;
 utilityVariables.nExpected = nExpected;
+utilityVariables.nExpectedFrac = nExpectedFrac;               % (nLayers x 1) capacity fraction of local population
+utilityVariables.spatiallyRestricted = spatiallyRestricted;   % (nLoc x nLayers) true = layer unavailable here
 utilityVariables.hardSlotCountYN = hardSlotCountYN;
 utilityVariables.hasOpenSlots = false(size(hardSlotCountYN));
 utilityVariables.localOnly = logical(localOnly);  % flags agricultural (location-tied) layers

@@ -26,6 +26,13 @@ classdef Agent < handle
                             % trigger when >= distressN_quarters.
                             % Decremented (floor 0) on quarters above
                             % threshold.
+       lastDistressMoveT    % timestep of the agent's most recent
+                            % distress-triggered move (set in
+                            % midasMainLoop.m). Used by variant E
+                            % (distressTriggerCode == 5) to enforce a
+                            % re-fire cooldown, since the income-shock
+                            % condition can stay true for several
+                            % quarters after a failed harvest.
 
        %agent accumulated data
        network
@@ -99,6 +106,7 @@ classdef Agent < handle
          A.trapped = 0;
          A.consecutiveFIYears = 0;
          A.quartersBelowWealthThreshold = 0;
+         A.lastDistressMoveT = -9999;
       end %  
       
       %as written presently, most agent actions are coded as model

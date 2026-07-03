@@ -38,6 +38,18 @@ modelParameters.unskilled1Utility = 10;
 modelParameters.schoolLength = 16;
 modelParameters.remitRate = 0;
 modelParameters.creditMultiplier = 0.3;
+
+% Dynamic layer capacity: when true, nExpected (the number of agents a
+% layer can absorb per location before congestion decay) is recomputed
+% each timestep as nExpected_frac x CURRENT regional agent population,
+% instead of staying frozen at the 1985 initial population. The frozen
+% version mechanically deepens congestion as the population grows ~3x
+% over 1985-2025 (and further to 2085), creating a secular income decline
+% and migration trend unrelated to climate that contaminates epoch-ratio
+% outputs (e.g. migration 2085 vs 2025) and SSP scenario contrasts.
+% Set false ONLY to reproduce legacy (pre-fix) runs. See the recompute
+% block near the top of the midasMainLoop.m time loop.
+modelParameters.dynamicNExpected = true;
 modelParameters.normalFloodMultiplier = 1;
 modelParameters.ruralUrbanTime = 0.2; %Proportion of time needed for transit between rural and urban layers of portfolio
 
@@ -163,6 +175,30 @@ modelParameters.distressCriticalShortfall    = 2.0;   % cumulative shortfall sum
 
 % Variant D parameters
 modelParameters.distressStochasticAlpha = 3.0;   % steepness of depth-to-probability response (Variant D; higher = more responsive to shortfall depth)
+
+% Variant E parameters (income-shock trigger; see checkDistressTrigger.m case 5)
+% Fires when last-year realised income < distressIncomeDropFrac x the mean
+% of the preceding distressIncomeWindowYears annual incomes. Conditions on
+% the INCOME link of the drought->migration chain (alive, ~-9% in kere
+% years, DSF-scaled) rather than the wealth/FI link (dead) used by A-D.
+modelParameters.distressIncomeDropFrac    = 0.6;  % fire below 60% of trailing mean
+modelParameters.distressIncomeWindowYears = 3;    % trailing baseline window (years)
+modelParameters.distressCooldownQuarters  = 4;    % min quarters between distress moves
+
+% Local demand coupling (see createUtilityLayers.m): scales non-ag layer
+% base utility per location-year by 1 - kappa*(1 - mean local ag yield
+% factor), so local non-farm income co-moves with the agricultural economy
+% instead of acting as a drought-immune absorber. 0 = off (legacy).
+modelParameters.localDemandCoupling = 0;
+
+% Positive-SPEI scale (see createUtilityLayers.m observed-SPEI block):
+% scales the POSITIVE SPEI yield perturbations only. 1 = symmetric
+% (legacy); 0 = wet years never lift yields above the GRMA baseline.
+% Proxy for asymmetric post-drought recovery (assets liquidated during
+% kere), which the chain audit showed the model lacks: post-kere years
+% currently carry a +4.6% above-trend income rebound that pulls
+% backward-looking agents back into southern agriculture.
+modelParameters.droughtPositiveSPEIScale = 1.0;
 
 modelParameters.saveImg = true;
 modelParameters.shortName = 'Mada_toy_application';

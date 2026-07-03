@@ -37,17 +37,25 @@ if nargin < 1 || isempty(nWorkers);      nWorkers      = 20;  end
 if nargin < 2 || isempty(taskId);        taskId        = 0;   end
 if nargin < 3 || isempty(drawsPerTask);  drawsPerTask  = 200; end
 if nargin < 4 || isempty(nRealisations); nRealisations = 1;   end
-if nargin < 5 || isempty(distressArm);   distressArm   = 1;   end
+if nargin < 5 || isempty(distressArm);   distressArm   = 0;   end
 if nargin < 6 || isempty(expectationArm); expectationArm = 0;  end
-% distressArm: 1=Variant A (FI counter), 2=Variant B (wealth+duration),
-% 3=Variant C (cumulative shortfall), 4=Variant D (stochastic depth).
+% distressArm: 0=OVERLAY OFF (true baseline), 1=Variant A (FI counter),
+% 2=Variant B (wealth+duration), 3=Variant C (cumulative shortfall),
+% 4=Variant D (stochastic depth), 5=Variant E (income shock vs own
+% trailing mean -- conditions on the income link of the chain, which the
+% chain audit showed is the last link carrying a drought signal).
 % expectationArm: 0=baseline (current MIDAS), 1=adaptive expectations,
 % 2=windowed sampling, 3=naive forecast, 4=adaptive+shocks.
 % Combined they select the active trigger/expectation logic AND the
 % output subfolder. See checkDistressTrigger.m and formExpectation.m.
-if ~ismember(distressArm, [1 2 3 4])
+%
+% NB: the default used to be 1 (Variant A) and the overlay-enable flag was
+% appended with bounds [1, 1] UNCONDITIONALLY, so every run through this
+% script -- including intended baselines and all expectation-arm runs --
+% had the Variant A overlay active. Default is now 0 = genuinely off.
+if ~ismember(distressArm, [0 1 2 3 4 5])
     error('runMIDASExperiment_parallel:badArm', ...
-          'distressArm must be 1, 2, 3, or 4; got %g', distressArm);
+          'distressArm must be 0 (off) or 1-5; got %g', distressArm);
 end
 if ~ismember(expectationArm, [0 1 2 3 4])
     error('runMIDASExperiment_parallel:badExpectationArm', ...
@@ -122,7 +130,10 @@ series = 'MC_Run_';
 % ./Outputs_ExpArm<N>/. If both an overlay and an expectation arm are
 % active simultaneously, the combined folder name is used.
 folderParts = {};
-if distressArm ~= 1
+if distressArm ~= 0
+    % Every ACTIVE distress arm gets its own suffix, including Variant A
+    % (previously arm 1 wrote to the baseline folder ./Outputs/, so a
+    % Variant A submission could collide with / masquerade as a baseline).
     folderParts{end+1} = sprintf('Arm%d', distressArm);
 end
 if expectationArm ~= 0
@@ -320,9 +331,15 @@ end
 % arms 2/3/4) just sit harmlessly in the parameter table.
 DISTRESS_ARM = distressArm;
 
+% Overlay enable flag follows the arm: 0 -> disabled (clean baseline),
+% 1-4 -> enabled with that trigger variant. distressTriggerCode = 0 is
+% additionally treated as 'disabled' inside checkDistressTrigger.m, so
+% arm 0 is doubly safe.
+distressEnabled = double(DISTRESS_ARM > 0);
+
 distressParamSpecs = { ...
     %  name                                                Lower  Upper  RoundYN  applies-to-arms
-    'modelParameters.distressMigrationEnabled',             1,     1,     1,      'all';   ...
+    'modelParameters.distressMigrationEnabled',             distressEnabled, distressEnabled, 1, 'all'; ...
     'modelParameters.distressTriggerCode',                  DISTRESS_ARM, DISTRESS_ARM, 1,  'all';  ...
     'modelParameters.distressN',                            1,     4,     1,      'A';     ...
     'modelParameters.distressWealthThreshold',              0,     5,     0,      'B,C,D'; ...
@@ -330,6 +347,9 @@ distressParamSpecs = { ...
     'modelParameters.distressShortfallWindowYears',         2,     5,     1,      'C';     ...
     'modelParameters.distressCriticalShortfall',            0.5,   10,    0,      'C';     ...
     'modelParameters.distressStochasticAlpha',              1,     10,    0,      'D';     ...
+    'modelParameters.distressIncomeDropFrac',               0.3,   0.9,   0,      'E';     ...
+    'modelParameters.distressIncomeWindowYears',            2,     5,     1,      'E';     ...
+    'modelParameters.distressCooldownQuarters',             4,     4,     1,      'E';     ...
 };
 
 for k = 1:size(distressParamSpecs, 1)
@@ -343,6 +363,55 @@ for k = 1:size(distressParamSpecs, 1)
     end
 end
 fprintf('[Distress overlay] Running ARM %d.\n', DISTRESS_ARM);
+
+% =============================================================================
+%  LOCAL DEMAND COUPLING (kappa)
+% =============================================================================
+% Scales non-ag layer base utility per location-year by
+% 1 - kappa*(1 - mean local ag yield factor), so local non-farm income
+% co-moves with the agricultural economy instead of acting as a
+% drought-immune shock absorber (see createUtilityLayers.m).
+% Set via SLURM env var, e.g.:
+%   sbatch --export=ALL,LOCAL_DEMAND_COUPLING=0.7 HPC/submit_calibration_batch.sh
+% Unset / invalid -> 0 (coupling off, legacy behaviour). To CALIBRATE kappa
+% instead of fixing it, replace the [v, v] bounds below with a range.
+couplingV = str2double(getenv('LOCAL_DEMAND_COUPLING'));
+if isnan(couplingV) || couplingV < 0 || couplingV > 1
+    couplingV = 0;
+end
+if ~ismember('modelParameters.localDemandCoupling', mcParams.Name)
+    mcParams = [mcParams; {'modelParameters.localDemandCoupling', couplingV, couplingV, 0}];
+end
+if couplingV > 0
+    folderParts{end+1} = sprintf('Coupling%02d', round(100 * couplingV));
+end
+
+% =============================================================================
+%  POSITIVE-SPEI SCALE (post-drought rebound suppression)
+% =============================================================================
+% Scales only the POSITIVE observed-SPEI yield perturbations (see
+% createUtilityLayers.m). 1 = symmetric/legacy; 0 = wet years never lift
+% yields above the GRMA baseline. Proxy for asymmetric post-kere recovery.
+% Set via SLURM env var, e.g.:
+%   sbatch --export=ALL,POSITIVE_SPEI_SCALE=0 HPC/submit_calibration_batch.sh
+posSpeiV = str2double(getenv('POSITIVE_SPEI_SCALE'));
+if isnan(posSpeiV) || posSpeiV < 0 || posSpeiV > 1
+    posSpeiV = 1;
+end
+if ~ismember('modelParameters.droughtPositiveSPEIScale', mcParams.Name)
+    mcParams = [mcParams; {'modelParameters.droughtPositiveSPEIScale', posSpeiV, posSpeiV, 0}];
+end
+if posSpeiV < 1
+    folderParts{end+1} = sprintf('PosSpei%02d', round(100 * posSpeiV));
+end
+
+% Recompute the output folder if either lever added a suffix.
+if couplingV > 0 || posSpeiV < 1
+    saveDirectory = ['./Outputs_' strjoin(folderParts, '_') '/'];
+    if ~exist(saveDirectory, 'dir'); mkdir(saveDirectory); end
+    fprintf('[Levers] coupling kappa = %.2f, positive-SPEI scale = %.2f; outputs -> %s\n', ...
+            couplingV, posSpeiV, saveDirectory);
+end
 
 % =============================================================================
 %  EXPECTATION-FORMATION OVERLAY: arm selector + parameter safety net

@@ -30,8 +30,21 @@ function fire = checkDistressTrigger(agent, modelParameters, indexT)
 %          when wealth < threshold; otherwise never fire. No state
 %          maintenance needed.
 %
+%     5 -- VARIANT E: income shock (drop vs own trailing mean)
+%          fire if the agent's realised income over the last cycleLength
+%          quarters is below distressIncomeDropFrac x the mean of the
+%          preceding distressIncomeWindowYears annual totals.
+%          Rationale (chain audit, 2026-07): the drought signal in the
+%          model is alive at the INCOME link (-9% in kere years, scaling
+%          with droughtScaleFactor) but completely dead at the
+%          wealth/FI link, where variants A-D all read their state.
+%          Variant E conditions on the last live link. A cooldown
+%          (distressCooldownQuarters since the agent's last distress
+%          move) prevents immediate re-firing while the trailing window
+%          still spans the shock.
+%
 %   The destination logic (choosePortfolio with distressMode=true) is
-%   shared across all four variants -- only the trigger differs.
+%   shared across all variants -- only the trigger differs.
 
 fire = false;
 
@@ -66,6 +79,32 @@ switch code
                     modelParameters.distressWealthThreshold;
             p = 1 - exp(-modelParameters.distressStochasticAlpha * depth);
             fire = rand() < p;
+        end
+
+    case 5   % VARIANT E: income shock vs own trailing mean
+        cl    = modelParameters.cycleLength;
+        wy    = modelParameters.distressIncomeWindowYears;
+        needQ = (wy + 1) * cl;              % last year + baseline window
+        histEnd = indexT - 1;               % income for the current quarter
+                                            % is realised AFTER decisions
+        % Require: full window of realised income, all of it after the
+        % agent's birth, and the re-fire cooldown elapsed.
+        if histEnd >= needQ && ...
+           (histEnd - needQ + 1) > agent.DOB && ...
+           length(agent.personalIncomeHistory) >= histEnd && ...
+           (indexT - agent.lastDistressMoveT) >= modelParameters.distressCooldownQuarters
+
+            inc = agent.personalIncomeHistory;
+            lastYear = sum(inc(histEnd - cl + 1 : histEnd));
+            baseline = 0;
+            for k = 1:wy
+                idx0 = histEnd - (k + 1) * cl + 1;
+                baseline = baseline + sum(inc(idx0 : idx0 + cl - 1));
+            end
+            baseline = baseline / wy;
+
+            fire = baseline > 0 && ...
+                   lastYear < modelParameters.distressIncomeDropFrac * baseline;
         end
 
     otherwise
