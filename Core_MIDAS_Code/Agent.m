@@ -33,6 +33,17 @@ classdef Agent < handle
                             % re-fire cooldown, since the income-shock
                             % condition can stay true for several
                             % quarters after a failed harvest.
+       buffer               % livestock/grain asset stock, in food-
+                            % equivalent (= wealth) units. Accrued from
+                            % agricultural surplus, grows slowly, dies in
+                            % drought, and is liquidated (at a drought-
+                            % dependent conversion rate) to cover
+                            % consumption shortfalls. See the buffer block
+                            % in midasMainLoop.m and Variant F in
+                            % checkDistressTrigger.m. Only meaningful when
+                            % modelParameters.bufferEnabled is true.
+       bufferHistory        % cell array: year-end buffer level per
+                            % timestep (parallels wealthHistory).
 
        %agent accumulated data
        network
@@ -107,6 +118,7 @@ classdef Agent < handle
          A.consecutiveFIYears = 0;
          A.quartersBelowWealthThreshold = 0;
          A.lastDistressMoveT = -9999;
+         A.buffer = 0;
       end %  
       
       %as written presently, most agent actions are coded as model

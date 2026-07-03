@@ -43,6 +43,18 @@ function fire = checkDistressTrigger(agent, modelParameters, indexT)
 %          move) prevents immediate re-firing while the trailing window
 %          still spans the shock.
 %
+%     6 -- VARIANT F: income shock AND depleted livestock buffer
+%          fire if the Variant E income-shock condition holds AND the
+%          agent's buffer is below modelParameters.bufferFloor. This is
+%          the empirically documented rule: households ride out a first
+%          failed harvest on the buffer and move only once it is drawn
+%          down to the reproductive floor. It therefore fires almost
+%          exclusively in continuation years, producing first-vs-
+%          continuation compounding endogenously. Requires
+%          modelParameters.bufferEnabled = true (otherwise the buffer is
+%          always 0 and the condition collapses to Variant E). Uses the
+%          same cooldown as Variant E.
+%
 %   The destination logic (choosePortfolio with distressMode=true) is
 %   shared across all variants -- only the trigger differs.
 
@@ -82,30 +94,16 @@ switch code
         end
 
     case 5   % VARIANT E: income shock vs own trailing mean
-        cl    = modelParameters.cycleLength;
-        wy    = modelParameters.distressIncomeWindowYears;
-        needQ = (wy + 1) * cl;              % last year + baseline window
-        histEnd = indexT - 1;               % income for the current quarter
-                                            % is realised AFTER decisions
-        % Require: full window of realised income, all of it after the
-        % agent's birth, and the re-fire cooldown elapsed.
-        if histEnd >= needQ && ...
-           (histEnd - needQ + 1) > agent.DOB && ...
-           length(agent.personalIncomeHistory) >= histEnd && ...
-           (indexT - agent.lastDistressMoveT) >= modelParameters.distressCooldownQuarters
+        fire = incomeShockFires(agent, modelParameters, indexT);
 
-            inc = agent.personalIncomeHistory;
-            lastYear = sum(inc(histEnd - cl + 1 : histEnd));
-            baseline = 0;
-            for k = 1:wy
-                idx0 = histEnd - (k + 1) * cl + 1;
-                baseline = baseline + sum(inc(idx0 : idx0 + cl - 1));
-            end
-            baseline = baseline / wy;
-
-            fire = baseline > 0 && ...
-                   lastYear < modelParameters.distressIncomeDropFrac * baseline;
+    case 6   % VARIANT F: income shock AND depleted buffer
+        % The buffer must exist for this to differ from Variant E.
+        bufFloor = 0;
+        if isfield(modelParameters, 'bufferFloor')
+            bufFloor = modelParameters.bufferFloor;
         end
+        fire = incomeShockFires(agent, modelParameters, indexT) && ...
+               (agent.buffer < bufFloor);
 
     otherwise
         % Unknown code -> treat as disabled rather than erroring out.
@@ -119,4 +117,34 @@ switch code
         fire = false;
 end
 
+end
+
+% =========================================================================
+function fires = incomeShockFires(agent, modelParameters, indexT)
+% Shared Variant E / F condition: realised income over the last cycleLength
+% quarters is below distressIncomeDropFrac x the mean of the preceding
+% distressIncomeWindowYears annual totals, subject to the re-fire cooldown.
+    fires = false;
+    cl    = modelParameters.cycleLength;
+    wy    = modelParameters.distressIncomeWindowYears;
+    needQ = (wy + 1) * cl;              % last year + baseline window
+    histEnd = indexT - 1;              % current-quarter income realised after decisions
+
+    if histEnd >= needQ && ...
+       (histEnd - needQ + 1) > agent.DOB && ...
+       length(agent.personalIncomeHistory) >= histEnd && ...
+       (indexT - agent.lastDistressMoveT) >= modelParameters.distressCooldownQuarters
+
+        inc = agent.personalIncomeHistory;
+        lastYear = sum(inc(histEnd - cl + 1 : histEnd));
+        baseline = 0;
+        for k = 1:wy
+            idx0 = histEnd - (k + 1) * cl + 1;
+            baseline = baseline + sum(inc(idx0 : idx0 + cl - 1));
+        end
+        baseline = baseline / wy;
+
+        fires = baseline > 0 && ...
+                lastYear < modelParameters.distressIncomeDropFrac * baseline;
+    end
 end

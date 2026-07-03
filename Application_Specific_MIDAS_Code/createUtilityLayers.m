@@ -1,4 +1,4 @@
-function [ utilityLayerFunctions, utilityHistory, utilityAccessCosts, utilityTimeConstraints, utilityDuration, utilityAccessCodesMat, utilityPrereqs, utilityBaseLayers, utilityForms, incomeForms, nExpected, hardSlotCountYN, localOnly, nExpectedFrac, spatiallyRestricted ] = createUtilityLayers(locations, modelParameters, demographicVariables )
+function [ utilityLayerFunctions, utilityHistory, utilityAccessCosts, utilityTimeConstraints, utilityDuration, utilityAccessCodesMat, utilityPrereqs, utilityBaseLayers, utilityForms, incomeForms, nExpected, hardSlotCountYN, localOnly, nExpectedFrac, spatiallyRestricted, agYF ] = createUtilityLayers(locations, modelParameters, demographicVariables )
 %createUtilityLayers builds all utility layer arrays from a CSV definition file.
 %
 % The CSV path is set by modelParameters.utilityLayersFile.
@@ -626,6 +626,26 @@ end
 % available at that location (spatial restrictions respected). kappa = 0
 % (default) reproduces legacy behaviour; kappa = 1 makes local non-farm
 % income fully proportional to the local agricultural economy.
+% Mean drought yield factor across the ag layers available at each location
+% and year (spatial restrictions respected). agYF(loc, yr) in [minYld, 1];
+% 1 = no drought effect, lower = worse harvest. This single array is the
+% common driver reused by (a) local demand coupling below, (b) the livestock
+% buffer's drought mortality, food-price spike and livestock-price conversion
+% in midasMainLoop.m. Exported so the main loop can index it by
+% location-year. Where a location has no ag layers, agYF = 1 (no effect).
+agYF = ones(nLoc, nSimYears);
+if ~isempty(grmaLayerIdx)
+    for iCyc = 1:nSimYears
+        for iLoc = 1:nLoc
+            availAg = grmaLayerIdx(~spatiallyRestricted(iLoc, grmaLayerIdx));
+            if ~isempty(availAg)
+                agYF(iLoc, iCyc) = mean(yieldFactor(iLoc, availAg, iCyc));
+            end
+        end
+    end
+end
+
+% --- Local demand coupling application ---
 kappa = 0;
 if isfield(modelParameters, 'localDemandCoupling')
     kappa = modelParameters.localDemandCoupling;
@@ -633,14 +653,7 @@ end
 if kappa > 0 && ~isempty(grmaLayerIdx)
     nonAgIdx = setdiff(1:nLayers, grmaLayerIdx(:)');
     for iCyc = 1:nSimYears
-        agYF = ones(nLoc, 1);
-        for iLoc = 1:nLoc
-            availAg = grmaLayerIdx(~spatiallyRestricted(iLoc, grmaLayerIdx));
-            if ~isempty(availAg)
-                agYF(iLoc) = mean(yieldFactor(iLoc, availAg, iCyc));
-            end
-        end
-        couplingFactor = 1 - kappa * (1 - agYF);   % (nLoc x 1), in [1-kappa, 1]
+        couplingFactor = 1 - kappa * (1 - agYF(:, iCyc));   % (nLoc x 1), in [1-kappa, 1]
         tStart = leadTime + (iCyc - 1) * modelParameters.cycleLength + 1;
         for iQ = 1:modelParameters.cycleLength
             utilityBaseLayers(:, nonAgIdx, tStart + iQ - 1) = ...

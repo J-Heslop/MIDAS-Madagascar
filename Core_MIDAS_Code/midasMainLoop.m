@@ -48,11 +48,37 @@ aspirationHistory = zeros(numLayers, modelParameters.timeSteps);
 % (annual_netIncome < annual_subsistence) and aligns with how Harvey et
 % al. (2014) measured months of food insufficiency per year.
 agLayerIdx = find(utilityVariables.localOnly);  % indices of agricultural (local-only) layers
+
+% --- Livestock/grain buffer configuration (see readParameters.m,
+%     createUtilityLayers.m agYF export, and checkDistressTrigger.m Variant F).
+%     All gated by modelParameters.bufferEnabled; when false the block is a
+%     no-op and behaviour is byte-for-byte legacy. Parameters are read once
+%     here into locals for speed. ---
+bufferOn = isfield(modelParameters, 'bufferEnabled') && modelParameters.bufferEnabled;
+if bufferOn
+    bfAccrualFrac = getParamOr(modelParameters, 'bufferAccrualFrac', 0.4);
+    bfGrowthRate  = getParamOr(modelParameters, 'bufferGrowthRate',  0.12);
+    bfMortMax     = getParamOr(modelParameters, 'bufferMortalityMax',0.3);
+    bfFloor       = getParamOr(modelParameters, 'bufferFloor',       1.0);
+    bfCap         = getParamOr(modelParameters, 'bufferCap',         50);
+    bfRef         = getParamOr(modelParameters, 'bufferRef',         10);
+    bfLambdaProd  = getParamOr(modelParameters, 'lambdaProd',        0.2);
+    bfPhiFood     = getParamOr(modelParameters, 'phiFood',           1.0);
+    bfPhiLv       = getParamOr(modelParameters, 'phiLv',             0.75);
+    % Per-agent mask of agricultural income layers (income-form AND local-only)
+    agIncomeMask  = (utilityVariables.incomeForms(:)' & utilityVariables.localOnly(:)');
+    nSimYearsBuf  = size(utilityVariables.agYF, 2);
+end
+
 nYearsTotal = ceil(modelParameters.timeSteps / modelParameters.cycleLength);
 foodInsecureCount_ag  = zeros(numLocations, nYearsTotal);
 foodInsecureCount_all = zeros(numLocations, nYearsTotal);
 agentCount_ag         = zeros(numLocations, nYearsTotal);
 agentCount_all        = zeros(numLocations, nYearsTotal);
+% Buffer trackers (year-end, per location). Summed then divided by the
+% agent count for a mean-buffer output; mortality-driven loss is the
+% year-on-year drop. Zero everywhere when bufferEnabled is false.
+bufferSum_all         = zeros(numLocations, nYearsTotal);
 %wealthHistory = zeros(modelParameters.numAgents,modelParameters.timeSteps);
 
 %create a list of shared layers, for use in choosing new link
@@ -382,7 +408,22 @@ for indexT = 1:modelParameters.timeSteps
             
             newIncome = sum(utilityVariables.utilityHistory(currentAgent.matrixLocation,currentPortfolio(utilityVariables.incomeForms(currentPortfolio)), indexT));
 
-            
+            % --- Buffer productive-input effect (§2.5b) ---
+            % Livestock is a productive input to farming (traction, manure,
+            % milk), so the agricultural portion of income scales with the
+            % herd. Losing the herd depresses ag income even in a good-rain
+            % year (a second ratchet on continuation/post-kere years), and a
+            % migrant whose remittance-fed buffer has rebuilt sees home
+            % agriculture become attractive again -> return migration.
+            if bufferOn && bfLambdaProd > 0
+                agIncomeThisT = sum(utilityVariables.utilityHistory( ...
+                    currentAgent.matrixLocation, ...
+                    agIncomeMask & currentPortfolio, indexT));
+                prodMult  = 1 + bfLambdaProd * min(1, currentAgent.buffer / bfRef);
+                newIncome = newIncome + (prodMult - 1) * agIncomeThisT;
+            end
+
+
             %add in any income that has been shared in to the agent, to
             %include in sharing-out decision-making
             newIncome = newIncome + currentAgent.currentSharedIn;
@@ -431,7 +472,19 @@ for indexT = 1:modelParameters.timeSteps
                 end
             end
             netIncome = newIncome - sum(actualPayments);
-            currentAgent.wealth = currentAgent.wealth + netIncome - agentParameters.subsistence_costs;
+
+            % --- Buffer food-price spike (§3, expenditure side) ---
+            % Food gets dearer in drought (entitlement failure): the effective
+            % subsistence cost rises with local drought severity. This deepens
+            % wealth decline for ALL agents in an affected region (including
+            % non-farm households), a direct route to the food-insecurity link.
+            subsistNow = agentParameters.subsistence_costs;
+            if bufferOn && bfPhiFood > 0
+                iyBuf = agYFYearIndex(indexT, modelParameters, nSimYearsBuf);
+                agYFnow = utilityVariables.agYF(currentAgent.matrixLocation, iyBuf);
+                subsistNow = subsistNow * (1 + bfPhiFood * (1 - agYFnow));
+            end
+            currentAgent.wealth = currentAgent.wealth + netIncome - subsistNow;
             currentAgent.wealthHistory{indexT} = currentAgent.wealth;
 
             % --- Wealth-threshold quarter counter (Variant B / distress) ---
@@ -476,9 +529,66 @@ for indexT = 1:modelParameters.timeSteps
                 if havePrevWealth
                     wealthStartVal = currentAgent.wealthHistory{prevYearEndIdx};
                     wealthEndVal   = currentAgent.wealth;
-                    wasInsecure    = (wealthEndVal < wealthStartVal);
+
+                    if bufferOn
+                        % --- Annual livestock/grain buffer dynamics (§2.1-2.4) ---
+                        iyB     = agYFYearIndex(indexT, modelParameters, nSimYearsBuf);
+                        agYFloc = utilityVariables.agYF(loc, iyB);
+                        buf     = currentAgent.buffer;
+
+                        % (i) Drought mortality: herd/store dies in proportion
+                        %     to local drought severity (climate -> asset, one link).
+                        buf = buf * (1 - bfMortMax * (1 - agYFloc));
+
+                        % (ii) Slow, concave biological growth (capped): a
+                        %      near-empty buffer rebuilds slowly -> the fast-
+                        %      crash / slow-recovery asymmetry.
+                        buf = min(bfCap, buf * (1 + bfGrowthRate));
+
+                        % (iii) Consumption gap this year (wealth decline).
+                        %       wealthEndVal already reflects the drought food-
+                        %       price spike, so the gap embeds terms-of-trade on
+                        %       the expenditure side.
+                        gap = max(0, wealthStartVal - wealthEndVal);
+
+                        if gap > 0
+                            % Liquidate buffer above the reproductive floor to
+                            % cover the gap, at a drought-depressed conversion
+                            % rate (terms-of-trade, asset side). Below the floor
+                            % the household defends breeding stock (asset
+                            % smoothing) and consumption crashes -> FI fires.
+                            convFac  = max(0.05, 1 - bfPhiLv * (1 - agYFloc));
+                            sellable = max(0, buf - bfFloor);
+                            food     = min(gap, sellable * convFac);
+                            buf      = buf - food / convFac;
+                            currentAgent.wealth = currentAgent.wealth + food;
+                            shortfall = gap - food;
+                        else
+                            % Surplus year: agri-pastoralists divert a share of
+                            % the surplus into the buffer (precautionary saving
+                            % by default). Non-ag agents keep their cash.
+                            shortfall = 0;
+                            if isAgAgent
+                                store = bfAccrualFrac * (wealthEndVal - wealthStartVal);
+                                store = min(store, max(0, bfCap - buf));
+                                buf   = buf + store;
+                                currentAgent.wealth = currentAgent.wealth - store;
+                            end
+                        end
+
+                        currentAgent.buffer = buf;
+                        wealthEndVal = currentAgent.wealth;           % buffer moved wealth
+                        currentAgent.wealthHistory{indexT} = currentAgent.wealth;
+                        currentAgent.bufferHistory{indexT} = buf;
+
+                        % FI is now unmet consumption AFTER drawing the buffer.
+                        wasInsecure = shortfall > 0;
+                    else
+                        wasInsecure = (wealthEndVal < wealthStartVal);
+                    end
 
                     agentCount_all(loc, yearIdx) = agentCount_all(loc, yearIdx) + 1;
+                    bufferSum_all(loc, yearIdx) = bufferSum_all(loc, yearIdx) + currentAgent.buffer;
                     if wasInsecure
                         foodInsecureCount_all(loc, yearIdx) = foodInsecureCount_all(loc, yearIdx) + 1;
                     end
@@ -591,6 +701,11 @@ outputs.foodInsecureCount_ag   = foodInsecureCount_ag(:,  firstPostSpinupYear:en
 outputs.foodInsecureCount_all  = foodInsecureCount_all(:, firstPostSpinupYear:end);
 outputs.agentCount_ag          = agentCount_ag(:,         firstPostSpinupYear:end);
 outputs.agentCount_all         = agentCount_all(:,        firstPostSpinupYear:end);
+% Mean livestock/grain buffer per location-year (post-spinup). Zero
+% everywhere when bufferEnabled is false. The year-on-year drop in a
+% drought year is the mortality signal; the level is the absorption state.
+outputs.bufferMean             = bufferSum_all(:, firstPostSpinupYear:end) ./ ...
+                                 max(1, agentCount_all(:, firstPostSpinupYear:end));
 outputs.aspirationHistory = aspirationHistory;
 
 agentList = agentList(1:agentParameters.currentID-1);
@@ -671,5 +786,28 @@ clear *Parameters;
 fprintf([runName '- completed.\n']);
 
 toc;
+end
+
+% =========================================================================
+% Local helpers for the livestock/grain buffer (see the buffer block above).
+% =========================================================================
+function v = getParamOr(s, name, default)
+% Return s.(name) if present, else default. Keeps the buffer defaults in
+% one place so a run that omits a buffer parameter still behaves sensibly.
+    if isfield(s, name)
+        v = s.(name);
+    else
+        v = default;
+    end
+end
+
+function iy = agYFYearIndex(indexT, modelParameters, nSimYears)
+% Map a timestep to its column in agYF (nLoc x nSimYears). agYF is filled
+% in createUtilityLayers.m starting at tStart = leadTime + (iCyc-1)*cycleLength+1
+% with leadTime = spinupTime, so the inverse for a post-spinup timestep is
+% iCyc = floor((indexT - spinupTime - 1)/cycleLength) + 1. During spinup we
+% clamp to year 1 (the spinup period repeats the first cycle's yields).
+    iy = floor((indexT - modelParameters.spinupTime - 1) / modelParameters.cycleLength) + 1;
+    iy = min(max(iy, 1), nSimYears);
 end
 

@@ -43,7 +43,9 @@ if nargin < 6 || isempty(expectationArm); expectationArm = 0;  end
 % 2=Variant B (wealth+duration), 3=Variant C (cumulative shortfall),
 % 4=Variant D (stochastic depth), 5=Variant E (income shock vs own
 % trailing mean -- conditions on the income link of the chain, which the
-% chain audit showed is the last link carrying a drought signal).
+% chain audit showed is the last link carrying a drought signal),
+% 6=Variant F (income shock AND depleted livestock buffer; auto-enables
+% the buffer).
 % expectationArm: 0=baseline (current MIDAS), 1=adaptive expectations,
 % 2=windowed sampling, 3=naive forecast, 4=adaptive+shocks.
 % Combined they select the active trigger/expectation logic AND the
@@ -53,9 +55,9 @@ if nargin < 6 || isempty(expectationArm); expectationArm = 0;  end
 % appended with bounds [1, 1] UNCONDITIONALLY, so every run through this
 % script -- including intended baselines and all expectation-arm runs --
 % had the Variant A overlay active. Default is now 0 = genuinely off.
-if ~ismember(distressArm, [0 1 2 3 4 5])
+if ~ismember(distressArm, [0 1 2 3 4 5 6])
     error('runMIDASExperiment_parallel:badArm', ...
-          'distressArm must be 0 (off) or 1-5; got %g', distressArm);
+          'distressArm must be 0 (off) or 1-6; got %g', distressArm);
 end
 if ~ismember(expectationArm, [0 1 2 3 4])
     error('runMIDASExperiment_parallel:badExpectationArm', ...
@@ -405,12 +407,47 @@ if posSpeiV < 1
     folderParts{end+1} = sprintf('PosSpei%02d', round(100 * posSpeiV));
 end
 
-% Recompute the output folder if either lever added a suffix.
-if couplingV > 0 || posSpeiV < 1
+% =============================================================================
+%  LIVESTOCK/GRAIN BUFFER
+% =============================================================================
+% Enabled either explicitly (BUFFER env var = 1, e.g. for Stage-1 tests with
+% the buffer under Variant E or no distress overlay) OR automatically when
+% Variant F (distressArm == 6) is selected, since Variant F reads the buffer.
+% The four CALIBRATED buffer parameters get sampling ranges here; the fixed/
+% definitional ones (growth, cap, ref, phiFood, phiLv) come from the
+% readParameters.m defaults and are intentionally NOT sampled.
+bufferEnvV = str2double(getenv('BUFFER'));
+bufferOn   = (~isnan(bufferEnvV) && bufferEnvV == 1) || (distressArm == 6);
+if bufferOn
+    if ~ismember('modelParameters.bufferEnabled', mcParams.Name)
+        mcParams = [mcParams; {'modelParameters.bufferEnabled', 1, 1, 1}];
+    end
+    bufferParamSpecs = { ...
+        %  name                                        Lower  Upper  RoundYN
+        'modelParameters.bufferAccrualFrac',            0.1,   0.7,   0;   ...
+        'modelParameters.bufferMortalityMax',          0.1,   0.5,   0;   ...
+        'modelParameters.bufferFloor',                  0.0,   3.0,   0;   ...
+        'modelParameters.lambdaProd',                   0.0,   0.5,   0;   ...
+    };
+    for k = 1:size(bufferParamSpecs, 1)
+        pname = bufferParamSpecs{k,1};
+        if ~ismember(pname, mcParams.Name)
+            mcParams = [mcParams; {pname, bufferParamSpecs{k,2}, ...
+                                          bufferParamSpecs{k,3}, ...
+                                          bufferParamSpecs{k,4}}];
+        end
+    end
+    folderParts{end+1} = 'Buffer';
+    fprintf('[Livestock buffer] ENABLED (env BUFFER=%g, distressArm=%d).\n', ...
+            bufferEnvV, distressArm);
+end
+
+% Recompute the output folder if any lever added a suffix.
+if couplingV > 0 || posSpeiV < 1 || bufferOn
     saveDirectory = ['./Outputs_' strjoin(folderParts, '_') '/'];
     if ~exist(saveDirectory, 'dir'); mkdir(saveDirectory); end
-    fprintf('[Levers] coupling kappa = %.2f, positive-SPEI scale = %.2f; outputs -> %s\n', ...
-            couplingV, posSpeiV, saveDirectory);
+    fprintf('[Levers] coupling kappa = %.2f, positive-SPEI scale = %.2f, buffer = %d; outputs -> %s\n', ...
+            couplingV, posSpeiV, bufferOn, saveDirectory);
 end
 
 % =============================================================================

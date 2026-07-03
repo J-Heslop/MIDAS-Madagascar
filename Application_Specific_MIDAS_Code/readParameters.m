@@ -200,6 +200,30 @@ modelParameters.localDemandCoupling = 0;
 % backward-looking agents back into southern agriculture.
 modelParameters.droughtPositiveSPEIScale = 1.0;
 
+% ----- Livestock/grain buffer (see livestock_buffer_design_v1.md,
+%       midasMainLoop.m buffer block, checkDistressTrigger.m Variant F) -----
+% Master switch. false = exact legacy behaviour (buffer stays 0 and no
+% coupling is applied). When true, agri-pastoral agents accrue a food-
+% equivalent asset stock from surplus, which grows slowly, dies in drought,
+% and is liquidated (at a drought-depressed rate) to cover shortfalls.
+modelParameters.bufferEnabled = false;
+
+% Optional starting endowment for every agent's buffer (food-equiv units).
+modelParameters.bufferInit = 0;
+
+% CALIBRATED parameters (ranges wired in runMIDASExperiment_parallel.m):
+modelParameters.bufferAccrualFrac  = 0.4;   % share of surplus stored as buffer
+modelParameters.bufferMortalityMax = 0.3;   % max fractional herd loss in worst drought
+modelParameters.bufferFloor        = 1.0;   % reproductive/asset-smoothing floor (food-equiv); Variant F fires below this
+modelParameters.lambdaProd         = 0.2;   % herd -> agricultural-income productivity gain (0 = off)
+
+% FIXED-from-data / definitional parameters:
+modelParameters.bufferGrowthRate   = 0.12;  % annual biological growth (~3-4 yr reconstitution)
+modelParameters.bufferCap          = 50;    % herd/store ceiling (food-equiv units)
+modelParameters.bufferRef          = 10;    % buffer at which the productivity gain saturates
+modelParameters.phiFood            = 1.0;   % food-price drought sensitivity (anchor: cassava x3, FEWS 2021) -- FIX from data
+modelParameters.phiLv              = 0.75;  % livestock-price drought sensitivity (anchor: small ruminants -75%, FEWS 2021) -- FIX from data
+
 modelParameters.saveImg = true;
 modelParameters.shortName = 'Mada_toy_application';
 agentParameters.currentID = 1;

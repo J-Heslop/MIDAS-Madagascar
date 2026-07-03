@@ -53,6 +53,16 @@ newAgent.shareCostThreshold = shareCostThreshold;
 newAgent.incomeShareFraction = incomeShareFraction;
 newAgent.wealth = wealth;
 newAgent.wealthHistory = cell(size(modelParameters.timeSteps,1));
+% Livestock/grain buffer (see Agent.m, midasMainLoop.m buffer block).
+% Starts empty and builds from agricultural surplus during spinup; an
+% optional non-zero starting endowment can be set via
+% modelParameters.bufferInit (defaults to 0 = legacy).
+if isfield(modelParameters, 'bufferInit')
+    newAgent.buffer = modelParameters.bufferInit;
+else
+    newAgent.buffer = 0;
+end
+newAgent.bufferHistory = cell(size(modelParameters.timeSteps,1));
 newAgent.realizedUtility = 0;
 newAgent.numBestLocation = numBestLocation;
 newAgent.numBestPortfolio = numBestPortfolio;
