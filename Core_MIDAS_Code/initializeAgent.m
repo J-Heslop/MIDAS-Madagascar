@@ -54,15 +54,14 @@ newAgent.incomeShareFraction = incomeShareFraction;
 newAgent.wealth = wealth;
 newAgent.wealthHistory = cell(size(modelParameters.timeSteps,1));
 % Livestock/grain buffer (see Agent.m, midasMainLoop.m buffer block).
-% Starts empty and builds from agricultural surplus during spinup; an
-% optional non-zero starting endowment can be set via
-% modelParameters.bufferInit (defaults to 0 = legacy).
-if isfield(modelParameters, 'bufferInit')
-    newAgent.buffer = modelParameters.bufferInit;
-else
-    newAgent.buffer = 0;
-end
+% Always born with zero buffer. The starter livestock/grain endowment is
+% granted later, the first time the agent takes up farming (occupies an
+% agricultural layer and pays the small-farm cost) -- see the farm-entry
+% grant in midasMainLoop.m -- not at birth.
+newAgent.buffer = 0;
+newAgent.farmBufferGranted = false;
 newAgent.bufferHistory = cell(size(modelParameters.timeSteps,1));
+newAgent.agIncomeYTD = 0;   % annual ag-income accumulator (see Agent.m)
 newAgent.realizedUtility = 0;
 newAgent.numBestLocation = numBestLocation;
 newAgent.numBestPortfolio = numBestPortfolio;

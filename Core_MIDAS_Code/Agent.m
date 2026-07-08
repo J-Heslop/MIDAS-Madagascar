@@ -44,6 +44,21 @@ classdef Agent < handle
                             % modelParameters.bufferEnabled is true.
        bufferHistory        % cell array: year-end buffer level per
                             % timestep (parallels wealthHistory).
+       farmBufferGranted    % logical: whether this agent has already
+                            % received its one-time starter livestock/grain
+                            % endowment (granted the first time it occupies
+                            % an agricultural layer -- i.e. takes up farming
+                            % and pays the small-farm cost -- not at birth).
+       agIncomeYTD          % running total of realised AGRICULTURAL income
+                            % this cycle-year (incl. the herd productivity
+                            % multiplier). Accumulated each quarter and
+                            % read+reset at year-end by the buffer block in
+                            % midasMainLoop.m: for ag agents the annual
+                            % consumption gap is measured in FOOD terms
+                            % (ag income vs subsistence), not as wealth
+                            % decline, so that accumulated cash wealth
+                            % cannot mask a failed harvest. Only maintained
+                            % when modelParameters.bufferEnabled is true.
 
        %agent accumulated data
        network
@@ -119,7 +134,9 @@ classdef Agent < handle
          A.quartersBelowWealthThreshold = 0;
          A.lastDistressMoveT = -9999;
          A.buffer = 0;
-      end %  
+         A.farmBufferGranted = false;
+         A.agIncomeYTD = 0;
+      end %
       
       %as written presently, most agent actions are coded as model
       %subroutines with input agents, as opposed to agent member functions

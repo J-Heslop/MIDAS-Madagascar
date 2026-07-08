@@ -208,21 +208,43 @@ modelParameters.droughtPositiveSPEIScale = 1.0;
 % and is liquidated (at a drought-depressed rate) to cover shortfalls.
 modelParameters.bufferEnabled = false;
 
-% Optional starting endowment for every agent's buffer (food-equiv units).
-modelParameters.bufferInit = 0;
+% Buffer SIZES are expressed in YEARS OF FOOD (multiples of annual
+% subsistence = cycleLength * subsistence_costs), so they stay interpretable
+% and auto-scale with the calibrated subsistence cost. Converted to absolute
+% food-equivalent units in midasMainLoop.m. A cap of ~1 year means the herd
+% can cover a single year of total crop failure -- it absorbs the first
+% drought year and is exhausted by a continuation year (the cascade driver);
+% it is NOT feasible to buffer many years of failure.
+modelParameters.bufferCapYears   = 1.0;   % ceiling, in years of food (CALIBRATED)
+modelParameters.bufferFloorYears = 0.2;   % reproductive/asset-smoothing floor, years of food (CALIBRATED); Variant F fires below this
+modelParameters.bufferInitYears  = 0.5;   % starter endowment on taking up farming, years of food (fixed)
+modelParameters.bufferRefFrac    = 0.5;   % productivity gain saturates at this fraction of the cap (fixed)
 
-% CALIBRATED parameters (ranges wired in runMIDASExperiment_parallel.m):
+% CALIBRATED rate parameters (ranges wired in runMIDASExperiment_parallel.m):
 modelParameters.bufferAccrualFrac  = 0.4;   % share of surplus stored as buffer
 modelParameters.bufferMortalityMax = 0.3;   % max fractional herd loss in worst drought
-modelParameters.bufferFloor        = 1.0;   % reproductive/asset-smoothing floor (food-equiv); Variant F fires below this
-modelParameters.lambdaProd         = 0.2;   % herd -> agricultural-income productivity gain (0 = off)
 
 % FIXED-from-data / definitional parameters:
 modelParameters.bufferGrowthRate   = 0.12;  % annual biological growth (~3-4 yr reconstitution)
-modelParameters.bufferCap          = 50;    % herd/store ceiling (food-equiv units)
-modelParameters.bufferRef          = 10;    % buffer at which the productivity gain saturates
+modelParameters.bufferAccrualCapFrac = 0.25; % max accrual per year, as fraction of cap: herd rebuilding is
+                                             % biological (~3-4 yr), not a one-boom-year purchase. Without this
+                                             % the post-drought rebound year refills the buffer instantly and
+                                             % erases the depletion memory that drives cascade compounding. (fixed)
+modelParameters.lambdaProd         = 0.2;   % herd -> agricultural-income productivity gain (0 = off)
 modelParameters.phiFood            = 1.0;   % food-price drought sensitivity (anchor: cassava x3, FEWS 2021) -- FIX from data
 modelParameters.phiLv              = 0.75;  % livestock-price drought sensitivity (anchor: small ruminants -75%, FEWS 2021) -- FIX from data
+
+% ----- Buffer agent-trace (diagnostic; see midasMainLoop.m buffer block) -----
+% When traceBuffer = true, the year-end buffer update for a small sample of
+% agents in traceRegions is logged step-by-step (start -> mortality -> growth
+% -> drawdown/accrual -> end, plus drought state, wealth, income, farm status)
+% and written to traceBufferFile as a CSV. Off by default. Use run_buffer_trace.m
+% for a one-command single local run. This is for eyeballing per-agent
+% mechanics that 200-run composites hide -- not for production.
+modelParameters.traceBuffer     = false;
+modelParameters.traceRegions    = [19 20 21];        % Androy, Anosy, Atsimo-Andrefana
+modelParameters.traceMaxAgents  = 15;                % cap distinct agents traced (first ag agents encountered)
+modelParameters.traceBufferFile = './Outputs/buffer_trace.csv';
 
 modelParameters.saveImg = true;
 modelParameters.shortName = 'Mada_toy_application';

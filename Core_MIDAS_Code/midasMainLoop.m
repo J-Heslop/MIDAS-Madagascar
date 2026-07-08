@@ -59,15 +59,45 @@ if bufferOn
     bfAccrualFrac = getParamOr(modelParameters, 'bufferAccrualFrac', 0.4);
     bfGrowthRate  = getParamOr(modelParameters, 'bufferGrowthRate',  0.12);
     bfMortMax     = getParamOr(modelParameters, 'bufferMortalityMax',0.3);
-    bfFloor       = getParamOr(modelParameters, 'bufferFloor',       1.0);
-    bfCap         = getParamOr(modelParameters, 'bufferCap',         50);
-    bfRef         = getParamOr(modelParameters, 'bufferRef',         10);
     bfLambdaProd  = getParamOr(modelParameters, 'lambdaProd',        0.2);
     bfPhiFood     = getParamOr(modelParameters, 'phiFood',           1.0);
     bfPhiLv       = getParamOr(modelParameters, 'phiLv',             0.75);
+
+    % Buffer sizes are given in YEARS OF FOOD; convert to absolute food-
+    % equivalent units using annual subsistence = cycleLength * subsistence_costs.
+    annualSubsist = modelParameters.cycleLength * agentParameters.subsistence_costs;
+    bfCap   = getParamOr(modelParameters, 'bufferCapYears',   1.0) * annualSubsist;
+    bfFloor = getParamOr(modelParameters, 'bufferFloorYears', 0.2) * annualSubsist;
+    bfFloor = min(bfFloor, 0.9 * bfCap);                            % floor must sit below the ceiling
+    % BUG FIX 2026-07-08: checkDistressTrigger.m (Variant F) reads the
+    % ABSOLUTE floor from modelParameters.bufferFloor, but after the
+    % years-of-food refactor only bufferFloorYears was defined -- so the
+    % trigger silently fell back to 0 and Variant F could NEVER fire.
+    % Publish the derived absolute value so the trigger sees the same
+    % floor used here.
+    modelParameters.bufferFloor = bfFloor;
+    bfInit  = getParamOr(modelParameters, 'bufferInitYears',  0.5) * annualSubsist;
+    bfInit  = min(bfInit, bfCap);                                    % never seed above the ceiling
+    bfRef   = getParamOr(modelParameters, 'bufferRefFrac',    0.5) * bfCap;
+
+    % Annual accrual rate limit (fraction of cap per year). Herd/store
+    % reconstitution is biological (~3-4 yr), not a one-boom-year purchase;
+    % without this cap the post-drought rebound year refills the buffer
+    % instantly and erases the depletion memory. Fixed, not calibrated.
+    bfAccrualCap = getParamOr(modelParameters, 'bufferAccrualCapFrac', 0.25) * bfCap;
+
     % Per-agent mask of agricultural income layers (income-form AND local-only)
     agIncomeMask  = (utilityVariables.incomeForms(:)' & utilityVariables.localOnly(:)');
     nSimYearsBuf  = size(utilityVariables.agYF, 2);
+end
+
+% --- Buffer agent-trace (diagnostic; gated, off by default) ---
+bufferTraceOn = bufferOn && isfield(modelParameters, 'traceBuffer') && modelParameters.traceBuffer;
+if bufferTraceOn
+    traceRegions   = getParamOr(modelParameters, 'traceRegions', [19 20 21]);
+    traceMaxAgents = getParamOr(modelParameters, 'traceMaxAgents', 15);
+    traceIDs       = [];        % agent ids being followed (first ag agents seen in traceRegions)
+    bufferTrace    = zeros(0, 16);   % preallocated columns; see header at write-out
 end
 
 nYearsTotal = ceil(modelParameters.timeSteps / modelParameters.cycleLength);
@@ -415,12 +445,21 @@ for indexT = 1:modelParameters.timeSteps
             % year (a second ratchet on continuation/post-kere years), and a
             % migrant whose remittance-fed buffer has rebuilt sees home
             % agriculture become attractive again -> return migration.
-            if bufferOn && bfLambdaProd > 0
+            if bufferOn
                 agIncomeThisT = sum(utilityVariables.utilityHistory( ...
                     currentAgent.matrixLocation, ...
                     agIncomeMask & currentPortfolio, indexT));
-                prodMult  = 1 + bfLambdaProd * min(1, currentAgent.buffer / bfRef);
-                newIncome = newIncome + (prodMult - 1) * agIncomeThisT;
+                if bfLambdaProd > 0
+                    prodMult  = 1 + bfLambdaProd * min(1, currentAgent.buffer / bfRef);
+                    newIncome = newIncome + (prodMult - 1) * agIncomeThisT;
+                    agIncomeThisT = prodMult * agIncomeThisT;
+                end
+                % Accumulate realised agricultural income (incl. the herd
+                % multiplier) for the year. Read and reset at year-end:
+                % the ag-agent consumption gap is measured in FOOD terms
+                % (annual ag income vs annual subsistence), making the
+                % buffer the first-line absorber of a failed harvest.
+                currentAgent.agIncomeYTD = currentAgent.agIncomeYTD + agIncomeThisT;
             end
 
 
@@ -522,6 +561,18 @@ for indexT = 1:modelParameters.timeSteps
                 loc            = currentAgent.matrixLocation;
                 isAgAgent      = any(currentPortfolio(agLayerIdx));
 
+                % --- Farm-entry starter endowment (§2.1) ---
+                % The first time an agent is farming, it acquires a starter
+                % livestock/grain stock (bought with the small-farm entry it
+                % just paid for). One-time, capped, and independent of the
+                % annual dynamics below. Represents "people buy livestock to
+                % help with the harvest" -- so the buffer is tied to taking up
+                % farming, not to birth.
+                if bufferOn && isAgAgent && ~currentAgent.farmBufferGranted
+                    currentAgent.buffer = max(currentAgent.buffer, bfInit);
+                    currentAgent.farmBufferGranted = true;
+                end
+
                 havePrevWealth = (prevYearEndIdx >= 1) && ...
                                  (prevYearEndIdx <= length(currentAgent.wealthHistory)) && ...
                                  ~isempty(currentAgent.wealthHistory{prevYearEndIdx});
@@ -534,22 +585,46 @@ for indexT = 1:modelParameters.timeSteps
                         % --- Annual livestock/grain buffer dynamics (§2.1-2.4) ---
                         iyB     = agYFYearIndex(indexT, modelParameters, nSimYearsBuf);
                         agYFloc = utilityVariables.agYF(loc, iyB);
-                        buf     = currentAgent.buffer;
+                        bufStart = currentAgent.buffer;   % (trace) level entering the year
+                        buf     = bufStart;
 
                         % (i) Drought mortality: herd/store dies in proportion
                         %     to local drought severity (climate -> asset, one link).
                         buf = buf * (1 - bfMortMax * (1 - agYFloc));
+                        bufAfterMort = buf;               % (trace)
 
                         % (ii) Slow, concave biological growth (capped): a
                         %      near-empty buffer rebuilds slowly -> the fast-
                         %      crash / slow-recovery asymmetry.
                         buf = min(bfCap, buf * (1 + bfGrowthRate));
+                        bufAfterGrow = buf;               % (trace)
 
-                        % (iii) Consumption gap this year (wealth decline).
-                        %       wealthEndVal already reflects the drought food-
-                        %       price spike, so the gap embeds terms-of-trade on
-                        %       the expenditure side.
-                        gap = max(0, wealthStartVal - wealthEndVal);
+                        % (iii) Consumption gap this year.
+                        %       FOOD-TERMS GAP (2026-07-08): for AG agents the
+                        %       gap asks "did this year's farm income cover
+                        %       annual subsistence (at the drought-spiked food
+                        %       price)?" -- NOT "did wealth decline?". The
+                        %       agent trace showed the wealth-decline gap never
+                        %       fires: unbounded accumulated wealth absorbs any
+                        %       one-year drought, so the buffer was never drawn
+                        %       and every shortfall-based trigger was dead.
+                        %       Measuring the gap in food terms makes the
+                        %       buffer the FIRST-LINE absorber of a failed
+                        %       harvest: a cash-rich farmer still draws down
+                        %       the herd/store after a bad year, which is the
+                        %       documented asset-smoothing behaviour of
+                        %       southern agro-pastoralists. Non-ag agents keep
+                        %       the legacy wealth-decline definition.
+                        if isAgAgent
+                            annualSubsistEff = annualSubsist * ...
+                                (1 + bfPhiFood * (1 - agYFloc));
+                            agSurplus = currentAgent.agIncomeYTD - annualSubsistEff;
+                            gap = max(0, -agSurplus);
+                        else
+                            gap = max(0, wealthStartVal - wealthEndVal);
+                            agSurplus = 0;
+                        end
+                        drawFood = 0; accrStore = 0;      % (trace) drawdown / accrual
 
                         if gap > 0
                             % Liquidate buffer above the reproductive floor to
@@ -563,16 +638,31 @@ for indexT = 1:modelParameters.timeSteps
                             buf      = buf - food / convFac;
                             currentAgent.wealth = currentAgent.wealth + food;
                             shortfall = gap - food;
+                            drawFood  = food;             % (trace)
                         else
                             % Surplus year: agri-pastoralists divert a share of
-                            % the surplus into the buffer (precautionary saving
-                            % by default). Non-ag agents keep their cash.
+                            % the AGRICULTURAL surplus into the buffer
+                            % (precautionary saving by default). Non-ag agents
+                            % keep their cash.
+                            %
+                            % RATE-LIMITED ACCRUAL (2026-07-08): annual accrual
+                            % is capped at bfAccrualCap. Herds are rebuilt
+                            % biologically over ~3-4 years, not repurchased in
+                            % a single boom year. Without this cap the post-
+                            % drought REBOUND year (chain audit: +4-5% above
+                            % trend) refills the buffer to its ceiling in one
+                            % step, erasing the multi-year depletion memory
+                            % that produces first-vs-continuation cascade
+                            % compounding -- i.e. it destroys exactly what the
+                            % buffer exists to provide.
                             shortfall = 0;
-                            if isAgAgent
-                                store = bfAccrualFrac * (wealthEndVal - wealthStartVal);
+                            if isAgAgent && agSurplus > 0
+                                store = bfAccrualFrac * agSurplus;
+                                store = min(store, bfAccrualCap);
                                 store = min(store, max(0, bfCap - buf));
                                 buf   = buf + store;
                                 currentAgent.wealth = currentAgent.wealth - store;
+                                accrStore = store;        % (trace)
                             end
                         end
 
@@ -583,6 +673,28 @@ for indexT = 1:modelParameters.timeSteps
 
                         % FI is now unmet consumption AFTER drawing the buffer.
                         wasInsecure = shortfall > 0;
+
+                        % --- Agent trace logging ---
+                        if bufferTraceOn && ismember(loc, traceRegions)
+                            if ~ismember(currentAgent.id, traceIDs) && ...
+                               numel(traceIDs) < traceMaxAgents && isAgAgent
+                                traceIDs(end+1) = currentAgent.id; %#ok<AGROW>
+                            end
+                            if ismember(currentAgent.id, traceIDs)
+                                % annual realised AG income (incl. herd
+                                % multiplier) -- the same quantity the food-
+                                % terms gap is computed from. (Previously this
+                                % summed personalIncomeHistory, i.e. TOTAL
+                                % income incl. non-ag and shared-in.)
+                                agInc = currentAgent.agIncomeYTD;
+                                calYear = modelParameters.startYear + iyB - 1;
+                                bufferTrace(end+1, :) = [ calYear, currentAgent.id, loc, ...
+                                    double(isAgAgent), agYFloc, bufStart, bufAfterMort, ...
+                                    bufAfterGrow, gap, drawFood, accrStore, buf, ...
+                                    wealthStartVal, currentAgent.wealth, agInc, ...
+                                    double(currentAgent.farmBufferGranted) ]; %#ok<AGROW>
+                            end
+                        end
                     else
                         wasInsecure = (wealthEndVal < wealthStartVal);
                     end
@@ -611,6 +723,14 @@ for indexT = 1:modelParameters.timeSteps
                     else
                         currentAgent.consecutiveFIYears = max(0, currentAgent.consecutiveFIYears - 1);
                     end
+                end
+
+                % Reset the annual ag-income accumulator at year-end for
+                % ALL agents (including those without a full prior year of
+                % wealth history, for whom the buffer block above was
+                % skipped) so next year's food-terms gap starts clean.
+                if bufferOn
+                    currentAgent.agIncomeYTD = 0;
                 end
             end
         end
@@ -707,6 +827,26 @@ outputs.agentCount_all         = agentCount_all(:,        firstPostSpinupYear:en
 outputs.bufferMean             = bufferSum_all(:, firstPostSpinupYear:end) ./ ...
                                  max(1, agentCount_all(:, firstPostSpinupYear:end));
 outputs.aspirationHistory = aspirationHistory;
+
+% --- Buffer agent-trace write-out (diagnostic) ---
+if bufferTraceOn
+    traceHdr = {'year','agentID','loc','isAg','agYF','buf_start', ...
+                'after_mortality','after_growth','gap','drawdown','accrual', ...
+                'buf_end','wealth_start','wealth_end','ag_income','farmGranted'};
+    outputs.bufferTrace       = bufferTrace;
+    outputs.bufferTraceHeader = traceHdr;
+    if isfield(modelParameters, 'traceBufferFile') && ~isempty(modelParameters.traceBufferFile)
+        try
+            traceTbl = array2table(bufferTrace, 'VariableNames', traceHdr);
+            writetable(traceTbl, modelParameters.traceBufferFile);
+            fprintf('%s - buffer trace (%d rows, %d agents) written to %s\n', ...
+                    runName, size(bufferTrace,1), numel(unique(bufferTrace(:,2))), ...
+                    modelParameters.traceBufferFile);
+        catch traceErr
+            warning('midasMainLoop: could not write buffer trace: %s', traceErr.message);
+        end
+    end
+end
 
 agentList = agentList(1:agentParameters.currentID-1);
 agentSummary = table([agentList(:).id]','VariableNames',{'id'});

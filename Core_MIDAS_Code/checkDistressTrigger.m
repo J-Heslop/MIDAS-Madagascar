@@ -98,9 +98,27 @@ switch code
 
     case 6   % VARIANT F: income shock AND depleted buffer
         % The buffer must exist for this to differ from Variant E.
-        bufFloor = 0;
+        %
+        % modelParameters.bufferFloor is the ABSOLUTE floor, derived in
+        % midasMainLoop.m as bufferFloorYears * annual subsistence. The
+        % parameter file only defines bufferFloorYears (years of food);
+        % do NOT read that here without converting. If the absolute value
+        % is missing, warn loudly rather than silently degenerating to 0
+        % (which makes the trigger unfireable) -- this exact silent
+        % failure occurred after the years-of-food refactor.
         if isfield(modelParameters, 'bufferFloor')
             bufFloor = modelParameters.bufferFloor;
+        else
+            persistent warnedFloor;
+            if isempty(warnedFloor)
+                warning('checkDistressTrigger:missingBufferFloor', ...
+                    ['Variant F is active but modelParameters.bufferFloor ' ...
+                     '(absolute units) is not set -- the buffer condition ' ...
+                     'can never be true. It should be derived from ' ...
+                     'bufferFloorYears in midasMainLoop.m.']);
+                warnedFloor = true;
+            end
+            bufFloor = 0;
         end
         fire = incomeShockFires(agent, modelParameters, indexT) && ...
                (agent.buffer < bufFloor);
