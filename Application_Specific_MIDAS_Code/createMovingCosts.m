@@ -33,10 +33,62 @@ baseMovingCosts = baseMovingCosts * 0;
 distanceCost = mapParameters.movingCostPerMile;%1000;%10000;  %maximum moving cost by distance
 
 %parameters for beta distribution
-beta1 = 5;
-beta2 = 2;
+% DISTANCE-COST SHAPE (changed 2026-08-09; vanilla MIDAS uses 5 and 2).
+%
+% distanceCost = betacdf((d - dMin)/(dMax - dMin), beta1, beta2) * maxCost,
+% so beta1/beta2 set how cost accumulates with distance across the band.
+%
+% beta(5,2) is strongly convex: its CDF is ~0 until roughly the band
+% midpoint. Measured against the real geography -- centroid distances for
+% the 22 regions run 42-855 miles, with nearest-neighbour moves at 42-140
+% (median 81) -- that put EVERY short move at essentially zero cost:
+%
+%     miles        42    81   140   277   408   545   855
+%     beta(5,2)  0.00  0.00  0.01  0.32  1.00  1.00  1.00
+%     beta(1,1)  0.00  0.05  0.12  0.29  0.45  0.62  0.99
+%
+% Short adjacent-region hops are exactly where the model's churn sits
+% (traced agents relocated 2.28 times per year; one visited 19 of the 22
+% regions), so under beta(5,2) the friction could not engage with it at any
+% cost level. Compressing the band instead would make friction saturate by
+% ~277 miles, discarding distance decay beyond the median pair.
+%
+% beta(1,1) is the uniform distribution, whose CDF is the identity, so cost
+% becomes LINEAR in distance across the band. That is the standard
+% gravity-model form and the one reviewers will expect; it is also the only
+% option that gives both short-range friction and a long-range gradient.
+% This is a departure from vanilla MIDAS and must be stated in the methods.
+beta1 = 1;
+beta2 = 1;
 distanceMin = mapParameters.minDistForCost; %below this distance in miles, we consider it 'free'
 distanceMax = mapParameters.maxDistForCost; %above this distance, costs don't really rise
+
+% GUARD 2026-08-04. minDistForCost and maxDistForCost are sampled
+% INDEPENDENTLY in runMIDASExperiment_parallel.m (0-50 and 0-5000
+% respectively) with no pairwise constraint, so a draw can produce
+% maxDistForCost < minDistForCost. That inverts the denominator below,
+% makes Db negative, and betacdf returns 0 for negative arguments -- so
+% distance cost collapses to zero and migration becomes FREE for the whole
+% run, silently and with no warning. Roughly 1% of draws are affected.
+% Swapping preserves both sampled values while restoring a valid band; the
+% warning makes the event visible in the log rather than leaving it to be
+% inferred from anomalous migration rates.
+if distanceMax < distanceMin
+    warning('createMovingCosts:invertedBand', ...
+        ['maxDistForCost (%g) < minDistForCost (%g) -- sampled independently ' ...
+         'with no constraint. Swapping to restore a valid band. Without this, ' ...
+         'distance costs would be zero everywhere and migration free.'], ...
+         distanceMax, distanceMin);
+    [distanceMin, distanceMax] = deal(distanceMax, distanceMin);
+end
+if distanceMax == distanceMin
+    % Degenerate band: zero width gives Db = Inf/NaN. Treat as a step at
+    % distanceMin, which is the limiting behaviour as the band narrows.
+    warning('createMovingCosts:zeroWidthBand', ...
+        ['maxDistForCost equals minDistForCost (%g). Applying distance cost ' ...
+         'as a step at that distance.'], distanceMin);
+    distanceMax = distanceMin + eps(distanceMin) * 1e6;
+end
 
 
 %translate actual distances into their beta distribution equivalent, then

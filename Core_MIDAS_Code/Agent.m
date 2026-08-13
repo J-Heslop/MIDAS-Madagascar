@@ -49,6 +49,36 @@ classdef Agent < handle
                             % endowment (granted the first time it occupies
                             % an agricultural layer -- i.e. takes up farming
                             % and pays the small-farm cost -- not at birth).
+       lastShortfall        % unmet consumption shortfall at the most
+                            % recent year-end (food gap remaining AFTER
+                            % buffer drawdown). Set in midasMainLoop's
+                            % buffer block; read by Variant F
+                            % (checkDistressTrigger case 6); reset on a
+                            % distress move. Stays 0 when bufferEnabled
+                            % is false.
+       livelihoodAttachment % scalar in [0,1], drawn U(0,1) at agent
+                            % creation: the agent's tendency to stay in
+                            % its current field of work. Used by
+                            % choosePortfolio (when
+                            % modelParameters.livelihoodAttachmentEnabled)
+                            % to penalise candidate portfolios in
+                            % proportion to how unfamiliar their layers
+                            % are (no prior experience). Active in
+                            % distressMode too: it cannot veto a forced
+                            % move (current location is excluded there),
+                            % only steer destination/livelihood choice.
+       recentExperience     % nLayers x 1 exponential moving average of
+                            % practiced layers: decayed each quarter by
+                            % attachmentRecencyDecay and replenished by
+                            % the layers currently in the portfolio
+                            % (updated in midasMainLoop's income loop
+                            % when livelihoodAttachmentEnabled). Drives
+                            % the RECENCY-WEIGHTED attachment familiarity
+                            % in choosePortfolio: layers left years ago
+                            % fade (half-life ~3 yrs at decay 0.94), so
+                            % attachment binds to the agent's recent
+                            % field of work, not every layer ever
+                            % touched. Initialised in initializeAgent.
        agIncomeYTD          % running total of realised AGRICULTURAL income
                             % this cycle-year (incl. the herd productivity
                             % multiplier). Accumulated each quarter and
@@ -86,7 +116,21 @@ classdef Agent < handle
        firstPortfolio
        agentPortfolioHistory
        agentAspirationHistory
-       personalIncomeHistory
+       personalIncomeHistory % GROSS income per quarter (layer income +
+                            % shared-in), written before remittance
+                            % outflows and before subsistence is deducted.
+       netIncomeHistory     % NET income per quarter = personal income MINUS
+                            % the drought-scaled subsistence cost actually
+                            % charged that quarter. Remittances are
+                            % deliberately excluded: sharing-out is a
+                            % behavioural choice, not hardship, so including
+                            % it would make the distress trigger fire on
+                            % behaviour. Written in midasMainLoop alongside
+                            % the wealth update; read by checkDistressTrigger
+                            % Variant F. NB the drought component of this
+                            % series comes from the food-price spike, which
+                            % is gated behind bufferEnabled -- see the write
+                            % site for the consequence.
        currentSharedIn
        lastIntendedShareIn
        moveHistory
@@ -136,6 +180,8 @@ classdef Agent < handle
          A.buffer = 0;
          A.farmBufferGranted = false;
          A.agIncomeYTD = 0;
+         A.lastShortfall = 0;
+         A.livelihoodAttachment = rand();
       end %
       
       %as written presently, most agent actions are coded as model

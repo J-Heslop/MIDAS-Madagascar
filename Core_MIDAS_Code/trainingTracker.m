@@ -33,8 +33,34 @@ currentAgent.training(newCerts) = true;
 %Test if agent aspiration is now selectable
 selectableLayers = selectableFlag(utilityVariables.utilityPrereqs, utilityVariables.utilityAccessCodesMat, utilityVariables.utilityAccessCosts, currentAgent.training, currentAgent.experience, [], [], utilityVariables.utilityDuration(:,2));
 
+% BUGFIX 2026-07-28 (spatial leak). selectableFlag checks prerequisites,
+% duration and cost only -- it knows nothing about location. Passed
+% unfiltered into createPortfolio, its top-up loop (createPortfolio.m:154)
+% will fill spare time with layers that do not exist at this agent's
+% location. Mask by spatial availability before it goes any further.
+selectableLayers = selectableLayers & ...
+    ~utilityVariables.spatiallyRestricted(currentAgent.matrixLocation,:)';
+
 if any(selectableLayers' & currentAgent.currentAspiration)
     currentAgent.currentPortfolio = createPortfolio(currentAgent.currentAspiration, [],utilityVariables.utilityTimeConstraints, utilityVariables.utilityPrereqs, currentAgent.pAddFitElement, currentAgent.training, currentAgent.experience, utilityVariables.utilityAccessCosts, utilityVariables.utilityDuration, currentAgent.numPeriodsEvaluate, selectableLayers, [], currentAgent.wealth, currentAgent.pBackCast, utilityVariables.utilityAccessCodesMat, modelParameters);
+
+    % SITE TRACE (diagnostic 2026-07-28). This call seeds the new portfolio
+    % FROM currentAspiration (argument 1). createPortfolio's
+    % "portfolio already specified" branch only ADDS to that seed -- it never
+    % strips it -- so anything in the aspiration survives regardless of
+    % `selectableLayers`. Aspirations are not location-masked anywhere.
+    badTT = currentAgent.currentPortfolio(1,1:numLayers) & ...
+            utilityVariables.spatiallyRestricted(currentAgent.matrixLocation,:);
+    if any(badTT)
+        persistent warnedTT
+        if isempty(warnedTT) || warnedTT < 5
+            if isempty(warnedTT); warnedTT = 0; end
+            warnedTT = warnedTT + 1;
+            fprintf('SITE=trainingTracker:45 agent=%d loc=%d layers=%s aspirationHad=%s\n', ...
+                currentAgent.id, currentAgent.matrixLocation, mat2str(find(badTT)), ...
+                mat2str(find(currentAgent.currentAspiration(1,1:numLayers))));
+        end
+    end
 
 %Adjust time of high-fidelity duration if new experience helps fulfill prereq
 else

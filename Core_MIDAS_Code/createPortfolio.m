@@ -195,7 +195,46 @@ if isempty(portfolio)
         %If agent doesn't have aspirations but needs to fill out planning
         %horizon, OR has aspirations but can't afford them after initial
         %training, set medium term high-fidelity portfolio
-        if any(aspirations) && agentResources < utilityCosts(indAspiration)
+        % BUGFIX 2026-07-28: aspiration affordability test.
+        %
+        % WAS: agentResources < utilityCosts(indAspiration)
+        %
+        % utilityCosts is utilityAccessCosts, an (nCostTypes x 2) array
+        % indexed by COST TYPE -- three types here (educationCost,
+        % largeFarmCost, smallFarmCost), so six elements. Column 1 holds the
+        % type CODE (1,2,3); column 2 holds the amount. indAspiration is a
+        % LAYER index (1..nLayers). Indexing one by the other read the wrong
+        % table: for the aspirations that actually occur in this
+        % configuration -- unskilled2 (layer 2) and skilled (layer 3) -- it
+        % returned the integers 2 and 3 from column 1, not a cost. Agents
+        % were therefore tested against "wealth < 2" and "wealth < 3", which
+        % almost always passed, so medTermFlag was effectively never set and
+        % the medium-term planning branch below (accumulate resources towards
+        % an aspiration you cannot yet afford) has been dead code.
+        %
+        % It only crashed on 2026-07-28 because the new spatial mask made
+        % restricted layers (vanilla = 9, industrial_crop = 10) into
+        % aspirations, indexing past the six available elements.
+        %
+        % NOW: resolve the layer's cost TYPE(s) via accesscodes, then read
+        % the amount from column 2 -- the same lookup selectableFlag.m uses.
+        % indAspiration is scalar by this point (narrowed at line ~122).
+        %
+        % BEHAVIOURAL CHANGE: this activates the medium-term planning path.
+        % Agents with unaffordable aspirations will now build interim
+        % portfolios and accumulate towards them instead of proceeding as
+        % though the aspiration were already affordable. Expect migration and
+        % occupational dynamics to shift; compare against a pre-fix baseline.
+        % GUARD: indAspiration is assigned only inside the `if any(aspirations)`
+        % block above (which closes at ~line 169), so it may not exist here.
+        % The original relied on && short-circuiting to avoid touching it;
+        % keep that protection explicitly.
+        aspirationCost = 0;
+        if any(aspirations) && ~isempty(accesscodes)
+            aspirationCost = sum(utilityCosts(accesscodes(:, indAspiration, 1) > 0, 2));
+        end
+
+        if any(aspirations) && agentResources < aspirationCost
             medTermFlag = true;
         elseif ~any(aspirations) && (highfidelityDuration < numPeriodsEvaluate)
             medTermFlag = true;
@@ -204,7 +243,25 @@ if isempty(portfolio)
             %Re-assess which layers are selectable after high-fidelity duration
             tempPortfolio = samplePortfolio;
 
-            selectableLayers = selectableFlag(prereqs, accesscodes, utilityCosts, agentTraining, newTraining, tempPortfolio, agentResources, utilityDuration(:,2));
+            % BUGFIX 2026-07-28 -- THE SPATIAL LEAK, finally located.
+            % selectableFlag checks prerequisites, duration and cost only; it
+            % has no knowledge of location. Recomputing here DISCARDED the
+            % location-masked `selectable` the caller passed in, and the
+            % top-up loop below then added any layer that fit the agent's
+            % remaining time. That is why masking `selectable` at all four
+            % call sites changed nothing: the mask was thrown away inside
+            % this function.
+            % It selects vanilla and not the rice layers because of the time
+            % profiles -- vanilla needs only Q3+Q4 at half time, so it fits
+            % almost any spare slot, whereas rice needs Q1+Q2+Q4 and collides
+            % with whatever the agent already does. Hence 90% of vanilla
+            % occupancy outside Sava|Analanjirofo while rice stayed correctly
+            % confined.
+            % `selectable` is the caller's location-filtered set; intersecting
+            % with it restores the constraint without changing the
+            % prerequisite/duration/cost logic.
+            selectableLayers = selectableFlag(prereqs, accesscodes, utilityCosts, agentTraining, newTraining, tempPortfolio, agentResources, utilityDuration(:,2)) ...
+                               & selectable;
             tempPortfolio(~selectableLayers) = false;
 
             timeUse = timeCalc(constraints, tempPortfolio, modelParameters);
@@ -220,16 +277,37 @@ if isempty(portfolio)
             end
 
             %Set medium Duration as minimum of (i) time required to acquire enough resources for aspiration, or remaining time left that agent has in their time horizon
-            if any(aspirations)
-                accumulatingDuration = min(ceil((utilityCosts(indAspiration) - agentResources) / newIncome), (numPeriodsEvaluate - highfidelityDuration)); 
+            % BUGFIX 2026-07-28 (same branch, three faults):
+            %  (a) utilityCosts(indAspiration) repeated the cost-type/layer
+            %      index confusion fixed above -- use aspirationCost, which
+            %      resolves the layer's cost type via accesscodes.
+            %  (b) The result could be NEGATIVE. If agentResources already
+            %      exceeds the cost the numerator is negative, giving a
+            %      portfolio chunk with negative duration. choosePortfolio.m
+            %      then computes endDuration < startDuration, sets
+            %      startDuration = endDuration + 1 <= 0, and indexes
+            %      currentPortfolioValue(0:end) -- "Array indices must be
+            %      positive integers". That is the 1998 crash.
+            %  (c) newIncome can be zero or negative (agents in deficit),
+            %      making the division Inf or NaN.
+            % None of this ever surfaced because medTermFlag was unreachable
+            % until the affordability test was corrected.
+            if any(aspirations) && newIncome > 0
+                needed = max(0, aspirationCost - agentResources);
+                accumulatingDuration = min(ceil(needed / newIncome), ...
+                                           numPeriodsEvaluate - highfidelityDuration);
             else
                 accumulatingDuration = numPeriodsEvaluate - highfidelityDuration;
             end
+            accumulatingDuration = max(0, accumulatingDuration);   % durations cannot be negative
             portfolioSets = [portfolioSets; [tempPortfolio' accumulatingDuration 1]];
-                
+
         end
-        
-        aspirationDuration = numPeriodsEvaluate - highfidelityDuration - accumulatingDuration; %Time left to dream about aspirations
+
+        %Time left to dream about aspirations. Clamped at 0 for the same
+        %reason as above -- a negative chunk duration corrupts the
+        %startDuration walk in choosePortfolio.
+        aspirationDuration = max(0, numPeriodsEvaluate - highfidelityDuration - accumulatingDuration);
         portfolioSets = [portfolioSets; [aspiration aspirationDuration 0]];
 
 

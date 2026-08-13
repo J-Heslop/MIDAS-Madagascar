@@ -23,11 +23,56 @@ function [ locations, map, borders, mapParameters ] = createMapFromSHP( mapParam
 
 shapeFileName = regexprep(mapParameters.filePath,'.shp','');
 
-try 
-    load([shapeFileName '.mat']);
-catch
-    
-    fprintf('No processed map found.  Building from shape file (This can take some time)...\n');
+try
+    % CACHE-CLOBBER FIX (2026-08-09).
+    %
+    % This was a bare `load([shapeFileName '.mat'])`. That form drops every
+    % variable in the .mat into the function workspace, and the cache
+    % (written by the save at the bottom of this file) contains a saved
+    % `mapParameters` struct. So the load REPLACED the mapParameters passed
+    % in by readParameters -- discarding every Monte Carlo draw and every
+    % run_*.m override of a map parameter, silently.
+    %
+    % Evidence it was live rather than theoretical:
+    %   - the cached struct carried filePath = './Data/Mada Boundary Files
+    %     Admin 2/...', a directory that no longer exists, while
+    %     readParameters sets './Data/Mada Admin 2/...'. The stale value was
+    %     reaching the run.
+    %   - it also carried movingCostPerMile = 0, so a local trace that set
+    %     20 produced movingCost = 0 on all 5,440 away-from-home candidates.
+    %   - across the 17k-run calibration, movingCostPerMile scored
+    %     max|PRCC| = 0.02 over all 33 outcomes -- 3rd lowest of 69
+    %     parameters, level with SD parameters that readParameters fixes at
+    %     zero. minDistForCost and maxDistForCost scored 0.05 and 0.04.
+    %     Migration was effectively free in every run of this model.
+    %
+    % Only three fields are genuinely PROPERTIES OF THE RASTERISED MAP and
+    % must come from the cache, because they are computed during
+    % rasterisation and the caller cannot know them:
+    %   r1     spatial reference, needed to convert pixel indices to miles
+    %          in createNetwork (if r1 is empty, distances stay in pixels
+    %          and every pair falls below minDistForCost)
+    %   sizeX  raster dimensions, set from the shapefile extent and
+    %   sizeY  deliberately transposed relative to the defaults
+    % Everything else -- costs, distance band, level names, save paths --
+    % is the caller's and must survive.
+    cached = load([shapeFileName '.mat']);
+    locations = cached.locations;
+    map       = cached.map;
+    borders   = cached.borders;
+    for fCache = {'r1', 'sizeX', 'sizeY'}
+        if isfield(cached.mapParameters, fCache{1})
+            mapParameters.(fCache{1}) = cached.mapParameters.(fCache{1});
+        end
+    end
+    clear cached;
+catch cacheErr
+    % Report WHY the cache was not used. Previously any failure here fell
+    % through silently to a rebuild, which needs the Mapping Toolbox and
+    % takes several minutes -- an expensive thing to trigger by accident on
+    % a cluster node, and impossible to diagnose after the fact.
+    fprintf(['No usable processed map (%s).  Building from shape file ' ...
+             '(This can take some time)...\n'], cacheErr.message);
     shapeData = shaperead(shapeFileName);
  
     %identify the number of levels requested
@@ -196,9 +241,29 @@ catch
     mapParameters.sizeY = sizeX;
     mapParameters.r1 = r1;
     
-    fprintf('Saving map for re-use.\n');
-    save([shapeFileName '.mat'], 'locations', 'map', 'borders', 'mapParameters');
+    % Save ONLY the geometry that rasterisation produced. Writing the whole
+    % mapParameters struct is what created the clobbering bug: the cache
+    % captured whichever run happened to build it, costs and all, and every
+    % later run inherited that run's draw. Under a parallel calibration
+    % campaign the captured values would be arbitrary. Storing three fields
+    % makes the cache incapable of carrying a behavioural parameter.
+    %
+    % Written via a helper so the saved variable keeps the name
+    % 'mapParameters' (which the load branch above and any pre-existing
+    % cache both expect) WITHOUT overwriting the live struct that this
+    % function has to return.
+    fprintf('Saving map for re-use (geometry only: r1, sizeX, sizeY).\n');
+    saveGeometryCache([shapeFileName '.mat'], locations, map, borders, ...
+                      struct('sizeX', sizeY, 'sizeY', sizeX, 'r1', r1));
 end
 
+end
+
+% =========================================================================
+function saveGeometryCache(fname, locations, map, borders, mapParameters) %#ok<INUSD>
+% Save the map cache. The fifth argument is named mapParameters purely so
+% that save() writes it under that name, matching what the load branch
+% expects, without the caller having to overwrite its own struct.
+save(fname, 'locations', 'map', 'borders', 'mapParameters');
 end
 

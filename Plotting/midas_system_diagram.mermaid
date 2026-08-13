@@ -1,0 +1,135 @@
+%% MIDAS-Madagascar — full integrated system diagram
+%% Conceptual labels (top line) with code references (italic, second line).
+%% Edit by changing text. Renders in VS Code (Mermaid preview), GitHub, or
+%% https://mermaid.live . See midas_system_diagram_legend.md for a walkthrough.
+%%
+%% Colour key:  grey = exogenous input   blue = core MIDAS (Bell/Cornell)
+%%              orange = Madagascar extension   purple = outputs/analysis
+flowchart TB
+
+  %% ============================ EXOGENOUS DRIVERS ============================
+  subgraph INPUTS["Exogenous drivers &nbsp;(indexed by calendar year)"]
+    direction LR
+    SPEI["<b>Drought signal — SPEI-6</b><br/>CEDA obs 1981–2022;<br/>GRMA SSP2 / SSP5 projections<br/><i>Extract SPEI from CEDA.jl</i>"]
+    DEMOGIN["<b>Demographic projections</b><br/>WCDE survival &amp; fertility, SSP2/SSP5<br/><i>survival_*.csv · fertility_*.csv</i>"]
+    POP["<b>Base population, 1985</b><br/>GHS-POP summed to ADM2<br/><i>1985_MDG_GHSPop…csv</i>"]
+    GEO["<b>Geography — 22 ADM2 regions</b><br/>GADM boundaries &amp; distances<br/><i>createMapFromSHP.m</i>"]
+  end
+
+  %% ============================ WORLD CONSTRUCTION ==========================
+  subgraph WORLD["World construction &nbsp;<i>buildWorld.m</i>"]
+    direction LR
+    AGYF["<b>Agricultural yield factor (agYF)</b><br/>drought multiplier per region-year<br/>max(0, 1 + α·max(0, −SPEI))<br/><i>createUtilityLayers.m</i>"]
+    UTIL["<b>Income / utility layers</b><br/>rice N/S, maize, cassava, vanilla,<br/>industrial crop, unskilled ×2, skilled, school<br/>access &amp; time costs, congestion capacity nExpected<br/><i>createUtilityLayers.m</i>"]
+    DEMOVARS["<b>Demographic rates</b><br/>survivalRate, fertilityRate (region×age×sex×year)<br/><i>buildDemography.m</i>"]
+    COSTS["<b>Mobility &amp; transfer costs</b><br/>moving cost, remittance fee/rate<br/><i>createMovingCosts.m · createRemittanceCosts.m</i>"]
+  end
+
+  %% ============================ AGENT STATE =================================
+  subgraph AGENTBOX["Agent &nbsp;<i>Agent.m</i>"]
+    direction LR
+    AGENT["<b>Core agent state</b><br/>location, wealth, portfolio, age/sex,<br/>risk coefficient, social network,<br/>knowsIncomeLocation, bestPortfolioValues"]
+    AGENTEXT["<b>Extension state (Madagascar)</b><br/>buffer &amp; bufferHistory, agIncomeYTD,<br/>lastShortfall, recentExperience (EMA),<br/>livelihoodAttachment"]
+  end
+
+  %% ============================ QUARTERLY CYCLE ============================
+  subgraph CYCLE["Quarterly simulation cycle &nbsp;<i>midasMainLoop.m</i> &nbsp;(cycleLength = 4)"]
+    direction TB
+    DEMOSTEP["<b>1 · Demography</b><br/>births &amp; deaths applied at currentYear"]
+    INTERACT["<b>2 · Social interaction</b><br/>meet network peers, share job knowledge,<br/>strengthen ties<br/><i>interact.m</i>"]
+    INCOME["<b>3 · Income realisation</b><br/>earn from portfolio layers<br/>× drought yield (agYF) × congestion (nExpected)<br/>accrue agIncomeYTD, update recentExperience"]
+    EXPECT["<b>4 · Form expectations</b><br/>estimate income time-path per layer &amp; location<br/><i>formExpectation.m</i>"]
+    DECIDE["<b>5 · Decision engine</b><br/>compare z locations × p portfolios;<br/>NPV of expected utility − access/moving costs<br/>+ expected network share-in − attachment penalty<br/><i>choosePortfolio.m</i>"]
+    MOVE["<b>6 · Adopt portfolio</b><br/>migrate if best location changes"]
+    REMIT["<b>7 · Remittances</b><br/>share income across network, pay transfer cost"]
+    DEMOSTEP --> INTERACT --> INCOME --> EXPECT --> DECIDE --> MOVE --> REMIT
+  end
+
+  %% ============================ DISTRESS OVERLAY ===========================
+  subgraph DISTRESS["Distress-migration overlay &nbsp;(Madagascar extension)"]
+    direction TB
+    TRIGGER["<b>Distress trigger</b><br/>Variant F: income shock AND<br/>material food shortfall (&gt; θ·subsistence)<br/>oracle positive-control = case 7<br/><i>checkDistressTrigger.m</i>"]
+    FORCED["<b>Forced migration</b><br/>choosePortfolio in distressMode:<br/>exclude current location, skip credit constraint"]
+    TRIGGER -->|"fires"| FORCED
+  end
+
+  %% ============================ BUFFER (YEAR-END) ==========================
+  subgraph BUFFER["Livestock / grain buffer &nbsp;— year-end &nbsp;(Madagascar extension)"]
+    direction TB
+    MORT["<b>Drought mortality</b><br/>herd/store loss scaled by agYF"]
+    GROW["<b>Regrowth &amp; accrual</b><br/>concave growth + rate-limited<br/>accrual from ag surplus"]
+    LIQ["<b>Liquidation</b><br/>drought-priced sale; finances migration"]
+    FICHK["<b>Food-insecurity check</b><br/>food-terms gap vs subsistence;<br/>sets lastShortfall"]
+    MORT --> GROW
+    MORT --> FICHK
+    GROW --> LIQ
+  end
+
+  %% ============================ OUTPUTS ====================================
+  subgraph OUT["Outputs &amp; analysis"]
+    direction LR
+    RESULTS["<b>Simulation outputs</b><br/>migrations, outMigrations, distressMigrations,<br/>migrationMatrix, foodInsecureCount,<br/>bufferMean, averageWealth"]
+    ANALYSIS["<b>Diagnostics (Julia)</b><br/>chain audit · kere metrics · PRCC<br/>detrended drought-excess migration<br/><i>ISF…/Write-up/Julia scripts</i>"]
+    RESULTS --> ANALYSIS
+  end
+
+  %% ============================ CROSS-BLOCK LINKS ==========================
+  %% Inputs -> world
+  SPEI -->|"drought multiplier"| AGYF
+  AGYF --> UTIL
+  DEMOGIN --> DEMOVARS
+  GEO --> UTIL
+  GEO --> COSTS
+  POP -->|"initial spatial distribution"| AGENT
+
+  %% World -> agent / cycle
+  UTIL --> INCOME
+  DEMOVARS --> DEMOSTEP
+  COSTS --> DECIDE
+  AGENT --> DEMOSTEP
+  AGENTEXT -.->|"attachment penalty"| DECIDE
+
+  %% Cycle internal state feedbacks
+  INCOME -->|"update wealth &amp; buffer"| AGENT
+  INCOME -->|"agIncomeYTD"| AGENTEXT
+  INTERACT -->|"network ties, known locations"| AGENT
+  AGENT -->|"share-in expectation"| DECIDE
+  MOVE -->|"relocation changes local density"| UTIL
+
+  %% Drought -> buffer
+  AGYF -->|"yield shock"| MORT
+  INCOME -->|"ag surplus"| GROW
+
+  %% Distress coupling
+  FICHK -->|"lastShortfall"| TRIGGER
+  INCOME -->|"income shock"| TRIGGER
+  FORCED -->|"routes through"| DECIDE
+  LIQ -->|"funds distress move"| FORCED
+
+  %% Return-migration loop
+  REMIT -->|"remittances rebuild buffer"| GROW
+  GROW -.->|"restocking enables return"| DECIDE
+
+  %% Cycle -> outputs
+  MOVE --> RESULTS
+  FORCED --> RESULTS
+  FICHK --> RESULTS
+
+  %% ============================ STYLING ====================================
+  classDef input  fill:#e8e8e8,stroke:#8a8a8a,stroke-width:1px,color:#222;
+  classDef core   fill:#dbe9f6,stroke:#2f6db0,stroke-width:1px,color:#10314f;
+  classDef ext    fill:#fde8d0,stroke:#d98324,stroke-width:1.3px,color:#5a3608;
+  classDef output fill:#eadcf5,stroke:#7a3fae,stroke-width:1px,color:#331347;
+
+  class SPEI,DEMOGIN,POP,GEO input;
+  class UTIL,COSTS,DEMOSTEP,INTERACT,INCOME,EXPECT,DECIDE,MOVE,REMIT,AGENT core;
+  class AGYF,AGENTEXT,TRIGGER,FORCED,MORT,GROW,LIQ,FICHK,DEMOVARS ext;
+  class RESULTS,ANALYSIS output;
+
+  style INPUTS fill:#f7f7f7,stroke:#bdbdbd
+  style WORLD fill:#f3f8fd,stroke:#9cc2e6
+  style AGENTBOX fill:#fbfbfb,stroke:#c9c9c9
+  style CYCLE fill:#f3f8fd,stroke:#9cc2e6
+  style DISTRESS fill:#fff6ec,stroke:#eab676
+  style BUFFER fill:#fff6ec,stroke:#eab676
+  style OUT fill:#f6f0fb,stroke:#c19be0

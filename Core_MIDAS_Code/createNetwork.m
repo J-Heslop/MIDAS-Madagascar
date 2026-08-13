@@ -58,7 +58,12 @@ connectionList = connectionList(randperm(length(connectionList)));
 
 %other vars to be used
 agentLocations = [agentList.matrixLocation];
+% currentPortfolio is [layers, duration, fidelity] (numLayers+2 wide) -- see
+% assignInitialLayers.m. Keep the layer columns only; the trailing duration
+% and fidelity would otherwise be treated as two extra layers in the
+% shared-layer weighting at line ~88.
 agentLayers = vertcat(agentList.currentPortfolio);
+agentLayers = agentLayers(:, 1:size(agentList(1).currentPortfolio, 2) - 2);
 
 %cycle through each connection and make it 
 for indexI = 1:length(connectionList)
@@ -85,7 +90,9 @@ for indexI = 1:length(connectionList)
     distanceWeight = distanceMatrix(currentAgent.matrixLocation,agentLocations);
         
     %create a list of shared layers (in same location)
-    layerWeight = currentAgent.currentPortfolio * ((agentLocations == currentAgent.matrixLocation)'*ones(1,size(agentLayers,2)))';
+    % Layer columns only -- see the note at the vertcat above. size(agentLayers,2)
+    % is already the trimmed width, so currentPortfolio must be trimmed to match.
+    layerWeight = currentAgent.currentPortfolio(1,1:size(agentLayers,2)) * ((agentLocations == currentAgent.matrixLocation)'*ones(1,size(agentLayers,2)))';
     
     %identify the new network link using the appropriate function for this
     %simulation

@@ -8,4 +8,4 @@ rice_south,10,1,0.5,0.5,0,0.5,0,1,0,0,8,Inf,smallFarmCost,,0.1,0,1,Amoron'i mani
 maize,15,1,0.5,0,0,0.5,1,0,0,0,8,Inf,smallFarmCost,,0.08,0,1,ALL,0.45,0.25,2,maize,0.65
 cassava,8,1,0.5,0.5,0.5,0.5,0,0,0,1,8,Inf,smallFarmCost,,0.12,0,1,ALL,0.15,0.5,7,cassava,0.85
 vanilla,50,1,0,0,0.5,0.5,0,0,0,1,16,Inf,largeFarmCost,,0.03,0,1,Sava|Analanjirofo,,,,,0
-industrial_crop,5,1,0,0.5,0.5,0,0,0,1,0,12,Inf,,,0.06,1,1,ALL,0.15,0.5,7,cassava,0
+industrial_crop,25,1,0,0.5,0.5,0,0,0,1,0,12,Inf,largeFarmCost,,0.04,0,1,ALL,,,,,0

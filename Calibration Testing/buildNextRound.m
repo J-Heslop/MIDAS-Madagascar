@@ -186,8 +186,8 @@ foodInsecureTarget_upper  = 0.75;        % ever insecure in a year -- upper plau
 %    disp(outputListRun);
 %catch
 
-    results_set = ' 8';
-    fileList = dir(strcat('D:/MIDAS outputs/Set ', results_set,' - SS/MC*.mat'));
+    results_set = 'Set 20 - final calib';
+    fileList = dir(strcat('D:/MIDAS outputs/', results_set,'/MC*.mat'));
     if isempty(fileList)
         error(strcat('No MC*.mat files found in D:/MIDAS outputs/Set ',results_set,' - SS/. Run runMIDASExperiment first.'));
     end
@@ -212,7 +212,40 @@ foodInsecureTarget_upper  = 0.75;        % ever insecure in a year -- upper plau
                 else
                     spinupSteps = 0;
                 end
-                tempMat = sum(rawMM(:,:,(spinupSteps+1):end), 3);
+                % CENSUS WINDOW (2026-08-09). This was sum(...(spinupSteps+1):end),
+                % i.e. the whole run. The comparison target is the 2018 RGPH
+                % census, so accumulating past 2018 compares model migration
+                % over a period the census never observed:
+                %   endYear 2025 -> 7 years of overshoot on every census metric
+                %   endYear 2085 -> 67 years, making them meaningless
+                % Silently, in both cases -- the metrics still compute.
+                %
+                % Cut at the last timestep of 2018 using the SAME year
+                % convention as the kere block below (year iy spans
+                % spinup+(iy-1)*cycleLen+1 .. spinup+iy*cycleLen, labelled
+                % startYear-1+iy), so the two halves of this file agree.
+                %
+                % CAVEAT: midasMainLoop's own year printout uses a different
+                % convention that ignores spinup, so the two disagree by
+                % ~2.5 years. This uses buildNextRound's convention because
+                % that is what the kere metrics already assume. Worth
+                % reconciling, but a 2-year ambiguity is immaterial next to
+                % the 7- and 67-year overshoots it replaces.
+                cycleLenC = 4; startYrC = 1985;
+                if isfield(currentRun.output, 'modelParameters')
+                    mpC = currentRun.output.modelParameters;
+                    if isfield(mpC, 'cycleLength'), cycleLenC = mpC.cycleLength; end
+                    if isfield(mpC, 'startYear'),   startYrC  = mpC.startYear;  end
+                end
+                CENSUS_YEAR = 2018;
+                lastStepC = spinupSteps + (CENSUS_YEAR - (startYrC - 1)) * cycleLenC;
+                lastStepC = min(lastStepC, size(rawMM, 3));
+                if lastStepC <= spinupSteps
+                    fprintf(['    WARNING: run ends before %d; census metrics ' ...
+                             'use the full run.\n'], CENSUS_YEAR);
+                    lastStepC = size(rawMM, 3);
+                end
+                tempMat = sum(rawMM(:,:,(spinupSteps+1):lastStepC), 3);
             else
                 tempMat = rawMM;  % already 2D (legacy format)
             end
@@ -233,11 +266,65 @@ foodInsecureTarget_upper  = 0.75;        % ever insecure in a year -- upper plau
             fracMigsRun  = tempMat / (sum(tempMat(:)) + eps);
 
             %% --- Per-capita migration rate ---
-            % Normalise by total number of agents that ever lived (use agentSummary)
-            if isfield(currentRun.output, 'agentSummary')
-                nAgentsTotal = size(currentRun.output.agentSummary, 1);
-            else
-                nAgentsTotal = sum(tempMat(:));
+            % DENOMINATOR (2026-08-09). This used size(agentSummary,1), the
+            % number of agents that EVER LIVED over the whole run. The
+            % observed side it is compared against is
+            %     migRateData_lifetime = lifetimeMat_model / totalPop
+            % where totalPop is the 2018 RGPH census population (line ~123).
+            % "Everyone who ever lived" and "population in 2018" are not the
+            % same denominator, and the gap widens with run length -- so the
+            % metric would not even be comparable between a 2025 calibration
+            % run and a 2085 projection run of the same model.
+            %
+            % Now uses modelled population in the census year, matching the
+            % observed definition. agentCount_all is (nLoc x nYears), one
+            % column per simulated year on the same convention as the census
+            % window above.
+            %
+            % SCOPE: migRate_r2 and the other r2 metrics are correlation-based
+            % and therefore scale-invariant, so they do not move. The ERROR
+            % metrics (MigRateError and its weighted variants) do move,
+            % because they compare levels. They were previously biased low by
+            % an inflated denominator.
+            % Prefer agentCount_pop (ALL AGES). As of 2026-08-12
+            % agentCount_all counts only working-age agents, to match the
+            % FAOSTAT 15+ employment concept that agFrac_nat_run is scored
+            % against. Migration, by contrast, is an all-ages event and the
+            % census side divides by total census population, so using the
+            % working-age series here would shrink the model denominator by
+            % roughly the under-15 share and bias the level-based error
+            % metrics. Older run files predate agentCount_pop and fall back to
+            % agentCount_all, which for them still meant all ages.
+            nAgentsTotal = [];
+            acAll = [];
+            if isfield(currentRun.output, 'agentCount_pop')
+                acAll = double(currentRun.output.agentCount_pop);
+            elseif isfield(currentRun.output, 'agentCount_all')
+                acAll = double(currentRun.output.agentCount_all);
+            end
+            if ~isempty(acAll)
+                yrIdxC = CENSUS_YEAR - (startYrC - 1);
+                if yrIdxC >= 1 && yrIdxC <= size(acAll, 2)
+                    popC = sum(acAll(:, yrIdxC));
+                    if popC > 0
+                        nAgentsTotal = popC;
+                    end
+                end
+            end
+            if isempty(nAgentsTotal)
+                % agentCount_all is written in the year-end buffer block, so
+                % it is empty when the buffer is disabled. Fall back rather
+                % than divide by zero, but say so -- the error metrics from
+                % such a run are on a different scale and must not be pooled
+                % with the others.
+                if isfield(currentRun.output, 'agentSummary')
+                    nAgentsTotal = size(currentRun.output.agentSummary, 1);
+                else
+                    nAgentsTotal = sum(tempMat(:));
+                end
+                fprintf(['    NOTE: no agentCount_all for %d; per-capita rate ' ...
+                         'falls back to all-agents-ever. Error metrics not ' ...
+                         'comparable with other runs.\n'], CENSUS_YEAR);
             end
             migRateRun = tempMat / (nAgentsTotal + eps);
 
@@ -311,22 +398,36 @@ foodInsecureTarget_upper  = 0.75;        % ever insecure in a year -- upper plau
             % (rice_north, rice_south, maize, cassava, vanilla,
             % industrial_crop -- the six layers in agLayerIdx).
             %
-            % Target value (agFrac_nat_data = 0.64) is from FAOSTAT
-            % "employment in agriculture (% of total employment)" for
-            % Madagascar, ~2019 figure. This is a labour-participation
-            % measure and is therefore the apples-to-apples comparison for
-            % MIDAS's layer-participation output -- unlike the previous
-            % urban-residence target (~0.19) from RGPH, which compared a
-            % residence concept to a participation concept and forced the
-            % calibration to push parameters to extremes to bridge a gap
-            % that was partly definitional rather than mechanistic.
+            % Target is "employment in agriculture (% of total employment)"
+            % for Madagascar, the modelled ILO estimate published by both
+            % FAOSTAT and the World Bank (indicator SL.AGR.EMPL.ZS). This is a
+            % labour-participation measure and is therefore the
+            % apples-to-apples comparison for MIDAS's layer-participation
+            % output -- unlike the previous urban-residence target (~0.19)
+            % from RGPH, which compared a residence concept to a
+            % participation concept and forced the calibration to push
+            % parameters to extremes to bridge a gap that was partly
+            % definitional rather than mechanistic.
+            %
+            % REVISED 2026-08-13, from 0.64. The old value was recorded as a
+            % ~2019 FAOSTAT figure but does not match the published series,
+            % which gives 69.4% for 2023, 70.1% for 2022, and a 76.1% mean
+            % over 1991-2023. The metric computed here is a PERIOD AVERAGE
+            % over all post-spinup years (1985-2025), so the like-for-like
+            % comparator is the period mean rather than any single recent
+            % year: agricultural employment fell steadily over the period, and
+            % scoring a four-decade average against a terminal-year value
+            % would bias the calibration toward too little agriculture.
+            % 0.76 is the 1991-2023 series mean; the series does not extend
+            % back to 1985, so the first six simulated years are unmatched and
+            % the true period mean is, if anything, slightly higher.
             %
             % The complementary urban fraction (= 1 - ag fraction) is
             % retained as a reporting diagnostic. Per-region urban /
             % ag fractions are likewise retained as diagnostics only --
             % MIDAS does not vary structurally across regions enough to
             % reproduce the 22-element spatial pattern reliably.
-            agFrac_nat_data       = 0.64;  % FAOSTAT 2019 Madagascar employment-in-ag share
+            agFrac_nat_data       = 0.76;  % ILO/FAOSTAT SL.AGR.EMPL.ZS, 1991-2023 mean
             urbanFracRun          = zeros(nRegions, 1);
             urbanFracError        = NaN;   % per-region pop-weighted SSE  (diagnostic)
             urbanFrac_r2          = NaN;   % per-region unweighted r²     (diagnostic)
@@ -334,7 +435,7 @@ foodInsecureTarget_upper  = 0.75;        % ever insecure in a year -- upper plau
             urbanFrac_nat_run     = NaN;   % national pop-weighted urban frac (diagnostic)
             urbanFracNatError     = NaN;   % (urban - urban_data)^2       (diagnostic only now)
             agFrac_nat_run        = NaN;   % national pop-weighted ag frac (model)
-            agFracNatError        = NaN;   % (model - 0.64)^2  -- SCORED
+            agFracNatError        = NaN;   % (model - agFrac_nat_data)^2 -- SCORED
 
             urbanFrac_nat_data = sum(urbanFracData .* popData) / sum(popData);
 
@@ -384,6 +485,78 @@ foodInsecureTarget_upper  = 0.75;        % ever insecure in a year -- upper plau
                 foodInsecureError = (foodInsecureRate_ag - foodInsecureTarget_agFrac)^2;
             end
 
+            %% --- Multi-year drought (kere) response metrics (2026-07) ---
+            % Time-resolved, per-run scalars so PRCC can attribute the
+            % drought response directly to input parameters. Detrending
+            % follows kere_metrics.jl's "local non-kere baseline" (excess-
+            % mortality-style estimator; robust to the 3-4x population-
+            % growth trend that confounds raw event-year ratios -- a zero-
+            % response model scores ~1.07-1.10 on the raw ratio).
+            %   kereExcess_south         mean detrended southern out-migration
+            %                            anomaly minus 1 across genuine-SPEI
+            %                            kere years
+            %   kereLagExcess_south      same for kere-year+1 (backward-
+            %                            looking agents respond with a lag)
+            %   cascadeContrast_south    continuation-year minus first-of-
+            %                            cascade mean anomaly: THE multi-year
+            %                            compounding target (empirically > 0)
+            %   distressKereExcess_south same excess on overlay-tagged
+            %                            distress moves only (NaN when the
+            %                            overlay is off / never fires)
+            % 2002 and 2013 are excluded (cyclone/locust/political crises
+            % with neutral-positive SPEI; see apply_observed_drought.py).
+            kereExcess_south         = NaN;
+            kereLagExcess_south      = NaN;
+            cascadeContrast_south    = NaN;
+            distressKereExcess_south = NaN;
+            try
+                if ndims(rawMM) == 3
+                    cycleLen = 4; startYr = 1985;
+                    if isfield(currentRun.output, 'modelParameters')
+                        mpK = currentRun.output.modelParameters;
+                        if isfield(mpK, 'cycleLength'), cycleLen = mpK.cycleLength; end
+                        if isfield(mpK, 'startYear'),   startYr  = mpK.startYear;  end
+                    end
+                    southIdx = 19:21;   % Androy, Anosy, Atsimo-Andrefana
+                    nTK  = size(rawMM, 3);
+                    nYrK = floor((nTK - spinupSteps) / cycleLen);
+                    outS = zeros(nYrK, 1);
+                    for iyK = 1:nYrK
+                        t0K = spinupSteps + (iyK - 1) * cycleLen + 1;
+                        blkK = rawMM(southIdx, :, t0K:t0K+cycleLen-1);
+                        outS(iyK) = sum(blkK(:));
+                    end
+                    yrsK      = startYr - 1 + (1:nYrK)';
+                    kereFirst = [1991 1997 2016 2021];
+                    kereCont  = [1992 2017 2018];
+                    kereAllK  = [kereFirst kereCont];
+
+                    anomK = kereAnomaly(yrsK, outS, kereAllK);
+                    inK   = ismember(yrsK, kereAllK);
+                    inLag = ismember(yrsK, kereAllK + 1) & ~inK;
+                    kereExcess_south      = mean(anomK(inK),   'omitnan') - 1;
+                    kereLagExcess_south   = mean(anomK(inLag), 'omitnan') - 1;
+                    cascadeContrast_south = mean(anomK(ismember(yrsK, kereCont)),  'omitnan') - ...
+                                            mean(anomK(ismember(yrsK, kereFirst)), 'omitnan');
+
+                    if isfield(currentRun.output, 'distressMigrations')
+                        dmK = double(currentRun.output.distressMigrations);
+                        dS  = zeros(nYrK, 1);
+                        for iyK = 1:nYrK
+                            t0K = spinupSteps + (iyK - 1) * cycleLen + 1;
+                            dS(iyK) = sum(sum(dmK(southIdx, t0K:t0K+cycleLen-1)));
+                        end
+                        if sum(dS) > 0
+                            anomD = kereAnomaly(yrsK, dS, kereAllK);
+                            distressKereExcess_south = ...
+                                mean(anomD(inK | inLag), 'omitnan') - 1;
+                        end
+                    end
+                end
+            catch kereME
+                fprintf('    (kere metrics failed for this run: %s)\n', kereME.message);
+            end
+
             %% Assemble input/output tables
             currentInputRun = array2table( ...
                 [currentRun.input.parameterValues]', ...
@@ -401,6 +574,8 @@ foodInsecureTarget_upper  = 0.75;        % ever insecure in a year -- upper plau
                 urbanFrac_nat_run, urbanFracNatError, ...
                 agFrac_nat_run, agFracNatError, ...
                 foodInsecureRate_ag, foodInsecureError, ...
+                kereExcess_south, kereLagExcess_south, ...
+                cascadeContrast_south, distressKereExcess_south, ...
                 'VariableNames', { ...
                     'FracMigsError','SourceWeightFracMigsError','DestWeightFracMigsError','JointWeightFracMigsError', ...
                     'MigRateError','SourceWeightMigRateError','DestWeightMigRateError','JointWeightMigRateError', ...
@@ -412,7 +587,9 @@ foodInsecureTarget_upper  = 0.75;        % ever insecure in a year -- upper plau
                     'urbanFracError','urbanFrac_r2','popWeightUrbanFrac_r2', ...
                     'urbanFrac_nat_run','urbanFracNatError', ...
                     'agFrac_nat_run','agFracNatError', ...
-                    'foodInsecureRate_ag','foodInsecureError'});
+                    'foodInsecureRate_ag','foodInsecureError', ...
+                    'kereExcess_south','kereLagExcess_south', ...
+                    'cascadeContrast_south','distressKereExcess_south'});
 
             if isempty(inputListRun)
                 inputListRun  = currentInputRun;
@@ -523,7 +700,7 @@ if height(outputListRun) > 0
     if ~isempty(validAgNat)
         agRun = outputListRun.agFrac_nat_run(~isnan(outputListRun.agFrac_nat_run));
         fprintf('agFrac_nat_run           %7.4f  %7.4f  %7.4f   (target: %.4f, FAOSTAT employment-in-ag, scored)\n', ...
-            mean(agRun), median(agRun), max(agRun), 0.64);
+            mean(agRun), median(agRun), max(agRun), agFrac_nat_data);
     end
     validFI = outputListRun.foodInsecureRate_ag(~isnan(outputListRun.foodInsecureRate_ag));
     if ~isempty(validFI)
@@ -601,16 +778,27 @@ end
 % the same way: migScore = r2 / max(r2 in batch).
 migWeight   = 0.34;
 agWeight    = 0.33;   % was urbanWeight; same role, scored on ag-participation
-% ---------------------------- TEMPORARY ----------------------------
-% fiWeight set to 0 for the round-7 RE-NARROW only. The food-insecurity
-% metric in the round-7 MC files was still computed under the OLD
-% per-timestep flow check (saturated ~99% median) -- the annual
-% aggregation fix only takes effect for runs produced AFTER the
-% midasMainLoop.m change. Including FI in this re-narrow would
-% pollute the scoring with a known-broken signal. REVERT TO 0.33
-% before the next buildNextRound run after new MC outputs are in.
-% --------------------------------------------------------------------
-fiWeight    = 0.0;   % TEMP: 0 for round-7 re-narrow only, revert to 0.33 after
+% REVERTED 2026-08-11. fiWeight was temporarily set to 0 for the round-7
+% re-narrow, because the food-insecurity metric in the round-7 MC files was
+% still computed under the old per-timestep flow check and saturated at a
+% median of ~99%; scoring on it would have polluted the narrowing with a
+% known-broken signal. The instruction was to restore 0.33 once MC outputs
+% produced after the annual-aggregation fix were available.
+%
+% Those outputs now exist. The 799-run set of 2026-08-11 returns a
+% foodInsecureRate_ag median of 0.1232 rather than the saturated ~0.99, which
+% confirms the annual aggregation is in effect and the signal is usable. The
+% zero weight is therefore no longer justified, and leaving it in place meant
+% the round narrowed on two of the three intended targets while reporting
+% food insecurity under "SCORED METRICS".
+%
+% NB the metric now UNDERSHOOTS: median 0.1232 against a target of 0.3167,
+% having previously overshot at 0.86. Part of that step change is a change of
+% population rather than of welfare -- the wage-labour exclusion removed
+% non-farming agents from agentCount_ag -- so the target and the metric should
+% be re-examined together rather than the weight alone being trusted to close
+% the gap.
+fiWeight    = 0.33;
 
 hasAg = ~isnan(outputListRun.agFracNatError);
 hasFI = ~isnan(outputListRun.foodInsecureRate_ag);
@@ -721,6 +909,40 @@ end % function buildNextRound
 %% -----------------------------------------------------------------------
 %  HELPER: population-weighted Pearson r²
 % -----------------------------------------------------------------------
+function anom = kereAnomaly(yrs, ts, kereYears)
+% Local non-kere baseline anomaly, mirroring kere_metrics.jl:
+% for each year, baseline = mean of ts over years within +/-hw that are
+% neither kere years nor the year immediately after a kere year (post-kere
+% rebound years would contaminate the baseline); hw starts at 4 and widens
+% until at least 3 baseline observations are found. anomaly = ts / baseline.
+% A no-response model gives anomaly ~= 1 in kere years by construction.
+%
+% HARDENING 2026-07-20: the first 5 simulated years are EXCLUDED from all
+% baselines. They carry the initialization spin-in transient (population /
+% wealth / buffer equilibration), and with the 1991-92 cascade only ~6
+% years after model start, transient contamination of its baseline mapped
+% spinupTime straight into the anomaly (spurious PRCC 0.86). Early years
+% can still RECEIVE an anomaly value; they just cannot define normality.
+    n      = numel(ts);
+    anom   = NaN(n, 1);
+    isKere = ismember(yrs, kereYears);
+    isPost = ismember(yrs, kereYears + 1);
+    isEarly = yrs < (min(yrs) + 5);
+    idx    = (1:n)';
+    for i = 1:n
+        hw   = 4;
+        base = [];
+        while numel(base) < 3 && hw <= n
+            win  = abs(yrs - yrs(i)) <= hw & ~isKere & ~isPost & ~isEarly & idx ~= i;
+            base = ts(win);
+            hw   = hw + 2;
+        end
+        if ~isempty(base) && mean(base) > 0
+            anom(i) = ts(i) / mean(base);
+        end
+    end
+end
+
 function rho_2 = weightedPearson(X, Y, w)
     % Guard against degenerate cases
     if sum(w) == 0 || var(X) == 0 || var(Y) == 0

@@ -45,6 +45,7 @@ newAgent.overlap = agentParameters.init_incomeLayersHistory;
 newAgent.expectedProbOpening = agentParameters.init_expectedProbOpening;
 newAgent.heardOpening = agentParameters.init_knowsIncomeLocation;
 newAgent.personalIncomeHistory = zeros(size(agentParameters.init_incomeLayersHistory,3),1);
+newAgent.netIncomeHistory      = zeros(size(agentParameters.init_incomeLayersHistory,3),1);
 newAgent.timeProbOpeningUpdated = zeros(size(agentParameters.init_expectedProbOpening));
 newAgent.currentSharedIn = 0;
 
@@ -62,6 +63,12 @@ newAgent.buffer = 0;
 newAgent.farmBufferGranted = false;
 newAgent.bufferHistory = cell(size(modelParameters.timeSteps,1));
 newAgent.agIncomeYTD = 0;   % annual ag-income accumulator (see Agent.m)
+newAgent.lastShortfall = 0; % unmet year-end consumption shortfall (Variant F; see Agent.m)
+% Livelihood attachment: tendency to stay in the current field of work,
+% heterogeneous across agents, U(0,1). See Agent.m and choosePortfolio.m.
+newAgent.livelihoodAttachment = rand();
+% Recency-weighted layer experience (EMA; see Agent.m) -- starts empty.
+newAgent.recentExperience = zeros(size(utilityVariables.utilityLayerFunctions,1),1);
 newAgent.realizedUtility = 0;
 newAgent.numBestLocation = numBestLocation;
 newAgent.numBestPortfolio = numBestPortfolio;

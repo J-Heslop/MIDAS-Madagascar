@@ -91,23 +91,25 @@ if exist('runMIDASExperiment_parallel.m', 'file') ~= 2
           'runMIDASExperiment_parallel.m not found in %s', pwd);
 end
 
-% ----- Distress overlay arm (0-5) -----
+% ----- Distress overlay arm (0-7) -----
 % Selects which trigger variant runMIDASExperiment_parallel uses and
 % which output folder it writes to. Override by setting DISTRESS_ARM
 % in the SLURM submission environment, e.g.:
 %     sbatch --export=ALL,DISTRESS_ARM=2 HPC/submit_calibration_batch.sh
 % 0 = TRUE BASELINE: distress overlay fully disabled.
 % 1-4 = Variants A-D. 5 = Variant E (income-shock trigger).
-% 6 = Variant F (income shock AND depleted livestock buffer; auto-enables
-% the buffer). LOCAL_DEMAND_COUPLING (0-1), POSITIVE_SPEI_SCALE (0-1) and
-% BUFFER (0/1) are read separately inside the runner.
+% 6 = Variant F (income shock AND unmet post-buffer shortfall; auto-enables
+% the buffer). 7 = ORACLE (exogenous agYF-conditioned trigger; DIAGNOSTIC
+% upper bound only -- do not use for production/projection runs).
+% LOCAL_DEMAND_COUPLING (0-1), POSITIVE_SPEI_SCALE (0-1), BUFFER (0/1) and
+% LIVELIHOOD_ATTACH (0/1) are read separately inside the runner.
 %
 % Defaults to 0 (clean baseline) if unset. NB: this default used to be 1
 % (Variant A), which meant every run submitted without DISTRESS_ARM --
 % including intended baselines and all EXPECTATION_ARM runs -- silently
 % had the Variant A distress overlay ACTIVE.
 distressArm = str2double(getenv('DISTRESS_ARM'));
-if isnan(distressArm) || ~ismember(distressArm, [0 1 2 3 4 5 6])
+if isnan(distressArm) || ~ismember(distressArm, [0 1 2 3 4 5 6 7])
     distressArm = 0;
     fprintf('DISTRESS_ARM env var unset or invalid; defaulting to 0 (overlay OFF, clean baseline).\n');
 else

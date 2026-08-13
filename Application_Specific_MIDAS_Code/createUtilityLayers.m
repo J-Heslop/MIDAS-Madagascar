@@ -710,12 +710,96 @@ numAgentsModel      = locationProb * modelParameters.numAgents;
 % regional population each timestep when modelParameters.dynamicNExpected
 % is enabled (constant-fraction semantics: capacity = frac x population,
 % rather than an absolute count frozen at the initial population).
-nExpectedFrac = double(layerDefs.nExpected_frac);   % (nLayers x 1)
+% PER-REGION CAPACITY (2026-07-28). nExpectedFrac was (nLayers x 1) -- one
+% capacity fraction per layer, applied identically in every region. It is now
+% (nLoc x nLayers) so non-farm employment capacity can follow the observed
+% urban/rural split per region (RGPH-3 2018 census, Tableau 2.2), which is
+% what raises the agricultural share in the Grand Sud from ~20% to a
+% realistic ~85-90% without hand-tuning layer utilities.
+% Default: broadcast the CSV column to every location (identical to the old
+% behaviour). Then override for any (region, layer) pair named in
+% modelParameters.nonAgCapacityFile, if that file is present.
+nExpectedFrac = repmat(double(layerDefs.nExpected_frac)', nLoc, 1);   % (nLoc x nLayers)
 
-nExpected = zeros(nLoc, nLayers);
-for iL = 1:nLayers
-    nExpected(:, iL) = floor(numAgentsModel * layerDefs.nExpected_frac(iL));
+capFile = '';
+if isfield(modelParameters, 'nonAgCapacityFile')
+    capFile = modelParameters.nonAgCapacityFile;
 end
+if ~isempty(capFile) && exist(capFile, 'file')
+    CAP = readtable(capFile, 'TextType', 'string');
+    % Match on a normalised name (lowercase, letters only) so that census
+    % spellings line up with the shapefile's -- e.g. "Atsimo Andrefana" vs
+    % "Atsimo-Andrefana", "Amoron'i Mania" vs "Amoroni_Mania".
+    norm = @(s) lower(regexprep(string(s), '[^A-Za-z]', ''));
+    locNorm = norm(locations.(locNameField));   % locNameField set in the spatial-restriction block above
+    capNorm = norm(CAP.region);
+    capLayerNames = string(CAP.Properties.VariableNames);
+    nMatched = 0; nApplied = 0; nPrefix = 0;
+    for iR = 1:height(CAP)
+        rows = find(locNorm == capNorm(iR));
+        if isempty(rows)
+            % TRUNCATION FALLBACK. Shapefile DBF attribute values are cut at
+            % a fixed field width -- 15 characters here, giving
+            % "Atsimo-Andrefan" for Atsimo Andrefana, "Vatovavy Fitovi" for
+            % Vatovavy Fitovinany and "Atsimo-Atsinana" for Atsimo
+            % Atsinanana. Those cannot be fixed in the census file, so match
+            % a truncated model name as a PREFIX of the census name --
+            % but only where the result is unambiguous, and only for names
+            % long enough that a prefix collision is implausible.
+            % NB startsWith(scalarStr, strArray) returns a SINGLE logical --
+            % true if the string starts with ANY element of the array -- so
+            % it cannot be used element-wise here. Loop explicitly.
+            isPrefix = false(numel(locNorm), 1);
+            for kLoc = 1:numel(locNorm)
+                if strlength(locNorm(kLoc)) >= 6 && ...
+                   strlength(locNorm(kLoc)) <= strlength(capNorm(iR)) && ...
+                   startsWith(capNorm(iR), locNorm(kLoc))
+                    isPrefix(kLoc) = true;
+                end
+            end
+            cand = find(isPrefix);
+            if numel(cand) == 1
+                rows = cand;
+                nPrefix = nPrefix + 1;
+            elseif numel(cand) > 1
+                warning(['createUtilityLayers: census region "%s" prefix-matches ' ...
+                         '%d model locations (%s). Ambiguous -- skipped, this region ' ...
+                         'keeps the flat default.'], CAP.region(iR), numel(cand), ...
+                         strjoin(cellstr(string(locations.(locNameField)(cand))), ', '));
+            end
+        end
+        if isempty(rows); continue; end
+        nMatched = nMatched + 1;
+        for iL = 1:nLayers
+            thisLayer = string(layerDefs.name(iL));
+            if ismember(thisLayer, capLayerNames)
+                nExpectedFrac(rows, iL) = CAP.(char(thisLayer))(iR);
+                nApplied = nApplied + 1;
+            end
+        end
+    end
+    fprintf(['createUtilityLayers: per-region capacity applied from %s -- ' ...
+             '%d of %d census regions matched (%d by truncated-name prefix), ' ...
+             '%d (region,layer) overrides.\n'], ...
+             capFile, nMatched, height(CAP), nPrefix, nApplied);
+    if nMatched < height(CAP)
+        unmatchedCap = CAP.region(~ismember(capNorm, locNorm));
+        unmatchedLoc = locations.(locNameField)(~ismember(locNorm, capNorm));
+        warning(['createUtilityLayers: %d capacity region(s) did not match any ' ...
+                 'model location; those locations keep the flat per-layer default. ' ...
+                 'Names are compared lowercase, letters only.'], height(CAP) - nMatched);
+        fprintf('  UNMATCHED census names : %s\n', strjoin(cellstr(string(unmatchedCap)), ', '));
+        fprintf('  UNMATCHED model names  : %s\n', strjoin(cellstr(string(unmatchedLoc)), ', '));
+        fprintf(['  (Madagascar split Vatovavy Fitovinany into Vatovavy and Fitovinany\n' ...
+                 '   in 2021, and Haute Matsiatra is sometimes Matsiatra Ambony -- check\n' ...
+                 '   those first if the shapefile is a post-2021 vintage.)\n']);
+    end
+elseif ~isempty(capFile)
+    warning('createUtilityLayers: nonAgCapacityFile "%s" not found. Using uniform per-layer capacity.', capFile);
+end
+
+% (nLoc x 1) population .* (nLoc x nLayers) fractions -> (nLoc x nLayers)
+nExpected = floor(numAgentsModel .* nExpectedFrac);
 
 hardSlotCountYN = false(nLoc, nLayers);
 for iL = 1:nLayers

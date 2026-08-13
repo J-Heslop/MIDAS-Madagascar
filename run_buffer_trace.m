@@ -40,6 +40,8 @@ names = { ...
     'modelParameters.droughtScaleFactor';       ... % strong-ish so drought is visible in the trace
     'modelParameters.traceMaxAgents';           ... % how many southern ag agents to follow
     'agentParameters.subsistence_costs';        ... % SEE NOTE below
+    'modelParameters.livelihoodAttachmentEnabled'; ... % attachment on (agents still flip if they drew low attachment ~ U(0,1))
+    'modelParameters.livelihoodAttachmentScale';   ... % max fractional NPV penalty at full attachment / zero familiarity
     };
 % NOTE on subsistence_costs: the default (0.3/quarter = 1.2/yr) is far below
 % agent income (~5-17/yr), so wealth accumulates without bound, no drought
@@ -49,7 +51,7 @@ names = { ...
 % to activate at all; in production it comes from calibration (range 0.1-10).
 % 1.75/quarter (=7/yr) is a rough guess to make the surplus near zero so we
 % can see the buffer bite. Tune it up/down and watch the drawdown column.
-values = [ 1; 1; 6; 1; 1500; 0.30; 15; 1.75 ];
+values = [ 1; 1; 6; 1; 1500; 0.30; 200; 1.75; 1; 0.5 ];
 
 inputs = table(names, values, 'VariableNames', {'parameterNames', 'parameterValues'});
 
@@ -69,5 +71,36 @@ if isfield(output, 'bufferTrace') && ~isempty(output.bufferTrace)
     fprintf('Full trace (%d agents) in Outputs/buffer_trace.csv\n', numel(ids));
 else
     warning('No buffer trace produced -- check that bufferEnabled/traceBuffer took effect.');
+end
+
+% --- Distress-migration summary: did Variant F fire, and when? ---
+% distressMigrations is nLoc x timeSteps (subset of outMigrations tagged as
+% overlay-triggered in midasMainLoop). Aggregate to calendar years using the
+% same timestep->year mapping as agYFYearIndex (spinup clamped to year 1).
+if isfield(output, 'distressMigrations') && ~isempty(output.distressMigrations)
+    dm   = output.distressMigrations;
+    cyc  = 4;    % modelParameters.cycleLength default -- keep in sync
+    spin = 10;   % modelParameters.spinupTime default  -- keep in sync
+    nY   = floor((size(dm, 2) - spin) / cyc);
+    southY = zeros(1, nY);
+    allY   = zeros(1, nY);
+    for iy = 1:nY
+        t0 = spin + (iy - 1) * cyc + 1;
+        southY(iy) = sum(sum(dm(19:21, t0:t0+cyc-1)));
+        allY(iy)   = sum(sum(dm(:,     t0:t0+cyc-1)));
+    end
+    fprintf('\n--- Distress moves (trigger variant %d) ---\n', values(3));
+    fprintf('Total post-spinup: %d nationally, %d from southern regions (19-21)\n', ...
+            sum(allY), sum(southY));
+    for iy = find(southY > 0)
+        fprintf('  year %d : %3d southern distress moves\n', 1984 + iy, southY(iy));
+    end
+    if sum(allY) == 0
+        fprintf(['  NONE fired. Check the income-shock condition (needs %d+ years of\n' ...
+                 '  income history + cooldown) and that lastShortfall is being set\n' ...
+                 '  at year-end (requires bufferEnabled for Variant F).\n'], 3);
+    end
+else
+    fprintf('No distressMigrations field in output.\n');
 end
 end

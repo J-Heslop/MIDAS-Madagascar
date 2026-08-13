@@ -33,9 +33,13 @@ catch
     mcParams = [mcParams; {'modelParameters.utility_iDiscount', 0, 0.1, 0}];
     mcParams = [mcParams; {'modelParameters.utility_iYears', 10, 20, 1}];
     mcParams = [mcParams; {'modelParameters.remitRate', 0, 20, 0}];
-    mcParams = [mcParams; {'mapParameters.movingCostPerMile', 0, 5000, 0}];
-    mcParams = [mcParams; {'mapParameters.minDistForCost', 0, 50, 0}];
-    mcParams = [mcParams; {'mapParameters.maxDistForCost', 0, 5000, 0}];
+    % Kept in step with runMIDASExperiment_parallel.m (2026-08-09) -- see the
+    % long note there. movingCostPerMile is the cost of a maximum-distance
+    % (855 mile) move; the old 0-5000 ceiling was three orders of magnitude
+    % above annual income of 10-25. minDistForCost and maxDistForCost are no
+    % longer sampled: they describe the map, and are fixed in
+    % readParameters.m at the observed 40 and 860 mile extremes.
+    mcParams = [mcParams; {'mapParameters.movingCostPerMile', 2, 15, 0}];
     mcParams = [mcParams; {'networkParameters.networkDistanceSD', 5, 15, 1}];
     mcParams = [mcParams; {'networkParameters.connectionsMean', 1, 5, 1}];
     mcParams = [mcParams; {'networkParameters.connectionsSD', 1, 3, 1}];

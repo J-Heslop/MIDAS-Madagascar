@@ -134,6 +134,55 @@ consideredPortfolioSet = []; %List of portfolios considered by agent across all 
 %account for minimum number of years needed)
 agent = trainingTracker(agent, utilityVariables, modelParameters);
 
+% --- Livelihood attachment (gated; off = legacy) ---------------------
+% Agents have a heterogeneous tendency to stay in their current field of
+% work (agent.livelihoodAttachment ~ U(0,1), set at creation). When
+% enabled, each candidate portfolio's NPV is penalised in proportion to
+% how UNFAMILIAR its layers are -- the fraction of active layers in
+% which the agent has no prior experience (and which are not in its
+% current portfolio). A fully familiar portfolio (the current one, or a
+% relocation continuing the same livelihood) carries no penalty, so
+% attachment does not block "move but keep farming" -- the empirically
+% dominant Grand-Sud pathway. The penalty scales with |NPV| so it is
+% sign-safe for negative utility values.
+%
+% Attachment stays ACTIVE in distressMode: the current location is
+% excluded from the candidate set there, so the penalty cannot veto the
+% forced move itself -- it only steers WHERE the agent goes and WHAT it
+% does, biasing displaced agents toward destinations where they can
+% continue their livelihood (the observed kere pattern: displaced
+% southern farmers keep farming at the destination).
+nUL = size(utilityVariables.utilityHistory, 2);
+attachOn = isfield(modelParameters, 'livelihoodAttachmentEnabled') && ...
+           modelParameters.livelihoodAttachmentEnabled;
+if attachOn
+    attachPenalty = modelParameters.livelihoodAttachmentScale * agent.livelihoodAttachment;
+    % RECENCY-WEIGHTED familiarity (2026-07-14; replaces the lifetime
+    % "ever worked" binary). agent.recentExperience is an exponential
+    % moving average maintained every quarter in midasMainLoop: decayed
+    % by attachmentRecencyDecay, replenished by currently-practiced
+    % layers. Normalising by the EMA's steady state (1/(1-decay)) maps
+    % continuous practice to familiarity 1; a layer abandoned ~3 years
+    % ago has faded to ~0.5; never-worked layers are 0. This penalises
+    % switching AWAY from the current field of work even between layers
+    % the agent once knew -- the alternation-among-known-layers churn
+    % that the lifetime definition left unpenalised (seen in traces).
+    dec = 0.94;
+    if isfield(modelParameters, 'attachmentRecencyDecay')
+        dec = modelParameters.attachmentRecencyDecay;
+    end
+    if isempty(agent.recentExperience)
+        attachOn = false;
+    else
+        layerFamil = min(1, agent.recentExperience(:)' * (1 - dec));
+        % Fresh entrants with no practice anywhere have nothing to be
+        % attached to -- skip the penalty entirely.
+        if ~any(layerFamil > 0)
+            attachOn = false;
+        end
+    end
+end
+
 %Check which layers are "selectable" based on agent prereqs
 selectable = selectableFlag(utilityVariables.utilityPrereqs, utilityVariables.utilityAccessCodesMat, utilityVariables.utilityAccessCosts, agent.training, agent.experience, agent.currentPortfolio, agent.wealth, utilityVariables.utilityDuration(:,2));
 
@@ -149,6 +198,16 @@ for indexL = 1:length(locationList)
     currentPortfolio = 1;
     currentMovingCost = mapVariables.movingCosts(currentLocation, locationList(indexL));
     locationMovingCosts(indexL) = currentMovingCost;
+
+    % BUGFIX 2026-07-28 (spatial leak). `selectable` above comes from
+    % selectableFlag, which checks prerequisites, duration and cost but is
+    % location-blind. createPortfolio's top-up loop (createPortfolio.m:154)
+    % draws from it with no location filter, so candidate portfolios for
+    % THIS location could include layers that do not exist here. Mask per
+    % candidate location -- note this must be inside the loop, since the
+    % available set differs between the locations being compared.
+    selectableHere = selectable & ...
+        ~utilityVariables.spatiallyRestricted(locationList(indexL),:)';
     
     %first portfolio is the current portfolio if this is the home city
     if(locationList(indexL) == agent.matrixLocation) %currentLocation
@@ -156,7 +215,7 @@ for indexL = 1:length(locationList)
         %Adjust for the fact that initial portfolios may not have a
         %duration or flag specified
         if size(agent.currentPortfolio(1,:),2) == size(utilityVariables.utilityHistory,2)
-            agent.currentPortfolio = [(agent.currentPortfolio .* selectable') agent.numPeriodsEvaluate 1];
+            agent.currentPortfolio = [(agent.currentPortfolio .* selectableHere') agent.numPeriodsEvaluate 1];
         end
         
         portfolioSet{currentPortfolio} = agent.currentPortfolio;
@@ -185,7 +244,16 @@ for indexL = 1:length(locationList)
     %last, come up with a few random portfolios to finish
     for indexP = (currentPortfolio):totalNumPortfolios
 
-        [nextRandom] = createPortfolio([], find(any(agent.knowsIncomeLocation(locationList(indexL),:),1)),utilityVariables.utilityTimeConstraints, utilityVariables.utilityPrereqs, agent.pAddFitElement, agent.training, agent.experience, utilityVariables.utilityAccessCosts, utilityVariables.utilityDuration, agent.numPeriodsEvaluate, selectable, utilityVariables.utilityHistory(indexL,:,currentT-4:currentT-1), agent.wealth, agent.pBackCast, utilityVariables.utilityAccessCodesMat, modelParameters);
+        % BUGFIX 2026-07-28 (part 2). The `layers` argument must be spatially
+        % filtered as well as `selectable`. createPortfolio derives its
+        % aspirations as (samplePortfolio & ~selectable) at line 113, and
+        % samplePortfolio is drawn from `layers`. With `selectable` now
+        % location-masked but `layers` still unfiltered, every restricted
+        % layer the agent had merely HEARD of became an "aspiration" -- which
+        % then indexed utilityAccessCosts out of bounds (see note below).
+        % An agent should not aspire to a livelihood that does not exist at
+        % the location being evaluated.
+        [nextRandom] = createPortfolio([], find(any(agent.knowsIncomeLocation(locationList(indexL),:),1) & ~utilityVariables.spatiallyRestricted(locationList(indexL),:)),utilityVariables.utilityTimeConstraints, utilityVariables.utilityPrereqs, agent.pAddFitElement, agent.training, agent.experience, utilityVariables.utilityAccessCosts, utilityVariables.utilityDuration, agent.numPeriodsEvaluate, selectableHere, utilityVariables.utilityHistory(indexL,:,currentT-4:currentT-1), agent.wealth, agent.pBackCast, utilityVariables.utilityAccessCodesMat, modelParameters);
         if(~isempty(nextRandom))
             portfolioSet{indexP} = nextRandom;   
         end
@@ -459,9 +527,58 @@ for indexL = 1:length(locationList)
         vSign(vSign < 0) = agent.prospectLoss;
         test3 = currentPortfolioValue';
         portfolioValues(indexP) = (1/riskCoeff) * (vSign .* (abs(currentPortfolioValue') .^ riskCoeff)) * discountFactor;
+
+        % --- Livelihood attachment penalty (see block near top) ---
+        % familiarity = fraction of this portfolio's active layers the
+        % agent has worked before; penalty grows with unfamiliarity.
+        if attachOn
+            layersP = logical(portfolioSubSet{indexP}(1, 1:nUL));
+            if any(layersP)
+                % mean recency-familiarity of this portfolio's layers
+                famil = sum(layerFamil(layersP)) / sum(layersP);
+                v = portfolioValues(indexP);
+                portfolioValues(indexP) = v - attachPenalty * (1 - famil) * abs(v);
+            end
+        end
     end
     
     %exclude new portfolios that are out of reach due to credit limit
+
+    % --- CHOICE-SET TRACE (diagnostic; no-op unless traceAgentLife) -------
+    % Placed BEFORE the credit-limit deletion below, deliberately. Once
+    % those rows are removed there is no way to distinguish an agent who
+    % stayed put because home was genuinely best from one who stayed
+    % because every alternative was unaffordable -- and no existing output
+    % separates those two. Recording the flag here keeps both visible.
+    if agentLifeTrace('enabled') && agentLifeTrace('isTraced', agent.id)
+        nCand = numel(portfolioValues);
+        if nCand > 0
+            crows = repmat(struct(), 1, nCand);
+            for iC = 1:nCand
+                lay = logical(portfolioSubSet{iC}(1, 1:nUL));
+                famC = NaN; penC = 0;
+                if attachOn && any(lay)
+                    famC = sum(layerFamil(lay)) / sum(lay);
+                    penC = attachPenalty * (1 - famC);
+                end
+                crows(iC).t             = currentT;
+                crows(iC).agentID       = agent.id;
+                crows(iC).homeLoc       = agent.matrixLocation;
+                crows(iC).candLoc       = locationList(indexL);
+                crows(iC).candIdx       = iC;
+                crows(iC).isHome        = double(locationList(indexL) == agent.matrixLocation);
+                crows(iC).layers        = agentLifeTrace('layerstring', lay);
+                crows(iC).nLayers       = sum(lay);
+                crows(iC).value         = portfolioValues(iC);
+                crows(iC).familiarity   = famC;
+                crows(iC).attachPenFrac = penC;
+                crows(iC).movingCost    = currentMovingCost;
+                crows(iC).creditBlocked = double(exceedsCreditLimit(iC));
+                crows(iC).distressMode  = double(distressMode);
+            end
+            agentLifeTrace('choice', crows);
+        end
+    end
 
     portfolioValues(exceedsCreditLimit) = [];
     portfolioSubSet(exceedsCreditLimit,:) = [];
@@ -559,12 +676,64 @@ try
 %now that we've paid everything, give the new portfolio to the agent, but
 %only give layers that actually have open slots ... this could be an
 %unlucky agent that shows up and doesn't get what they dreamed of.
-bestPortfolio(1,1:end-2) = utilityVariables.hasOpenSlots(agent.matrixLocation,:) & bestPortfolio(1,1:end-2);
-catch
+% INCUMBENCY EXEMPTION (2026-08-12).
+%
+% Capacity should gate HIRING, not continued employment. Previously this line
+% masked the chosen portfolio by hasOpenSlots alone, so an agent already
+% working a layer lost it the moment the layer was recorded as full --
+% including when it was filled by other agents in the same timestep. That was
+% tolerable only because slots never actually bound (occupancy ran at 1.7-6.5x
+% the census capacity, see midasMainLoop's live slot accounting). Now that
+% capacity binds within the timestep, masking incumbents out would evict
+% agents from jobs they already hold and generate exactly the churn the fix is
+% meant to remove.
+%
+% An agent therefore retains any layer it ALREADY held, provided it is staying
+% in the same location. A move forfeits the old position: you cannot keep a
+% job in a district you have left. agent.currentPortfolio is still the PRIOR
+% portfolio at this point (it is overwritten a few lines below), and
+% currentLocation was captured at the top of this function before
+% agent.matrixLocation was reassigned, so both are the pre-decision values.
+nLayersMask  = size(utilityVariables.hasOpenSlots, 2);
+capacityMask = utilityVariables.hasOpenSlots(agent.matrixLocation, :);
+if agent.matrixLocation == currentLocation
+    retained = logical(agent.currentPortfolio(1, 1:nLayersMask));
+    capacityMask = capacityMask | retained;
+end
+bestPortfolio(1,1:end-2) = capacityMask & bestPortfolio(1,1:end-2);
+catch capErr
+    % DIAGNOSTIC 2026-07-28: this bare catch silently swallowed any failure
+    % of the capacity mask, handing the agent an UNMASKED portfolio with no
+    % warning. If it is firing, spatially restricted and over-capacity layers
+    % pass straight through, which would explain vanilla appearing in all 22
+    % regions. Report it once rather than hiding it.
+    persistent warnedCapMask
+    if isempty(warnedCapMask)
+        warning('choosePortfolio:capacityMaskFailed', ...
+            ['Capacity mask (hasOpenSlots) FAILED and was skipped -- portfolio ' ...
+             'handed over unmasked. size(bestPortfolio)=%s, size(hasOpenSlots)=%s. ' ...
+             'Error: %s'], mat2str(size(bestPortfolio)), ...
+             mat2str(size(utilityVariables.hasOpenSlots)), capErr.message);
+        warnedCapMask = true;
+    end
     f=1;
 end
 
 agent.currentPortfolio = bestPortfolio;
+
+% SITE TRACE (diagnostic 2026-07-28).
+badCP = agent.currentPortfolio(1,1:size(utilityVariables.utilityHistory,2)) & ...
+        utilityVariables.spatiallyRestricted(agent.matrixLocation,:);
+if any(badCP)
+    persistent warnedCP
+    if isempty(warnedCP); warnedCP = 0; end
+    if warnedCP < 5
+        warnedCP = warnedCP + 1;
+        fprintf('SITE=choosePortfolio:629 agent=%d loc=%d layers=%s (hasOpenSlots there=%s)\n', ...
+            agent.id, agent.matrixLocation, mat2str(find(badCP)), ...
+            mat2str(utilityVariables.hasOpenSlots(agent.matrixLocation, find(badCP))));
+    end
+end
 
 if agent.currentPortfolio(end,end) == 0
     agent.currentAspiration = agent.currentPortfolio(end,1:size(utilityVariables.utilityHistory,2));

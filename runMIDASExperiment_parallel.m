@@ -204,7 +204,13 @@ catch
     %define the parameter space (same as runMIDASExperiment.m)
     mcParams = table([],[],[],[],'VariableNames',{'Name','Lower','Upper','RoundYN'});
 
-    mcParams = [mcParams; {'modelParameters.spinupTime', 8, 20, 1}];
+    % FROZEN 2026-07-20 (was sampled [8, 20]): spinupTime is a numerical
+    % setting, not a behavioural parameter. Sampling it injected
+    % initialization variance into every output and produced a spurious
+    % PRCC of 0.86 against kereExcess_south (the spin-in transient
+    % contaminates local detrending baselines for the 1991-92 cascade,
+    % which sits only ~6 years after initialization).
+    mcParams = [mcParams; {'modelParameters.spinupTime', 10, 10, 1}];
     mcParams = [mcParams; {'modelParameters.numAgents', 3000, 6000, 1}];
     mcParams = [mcParams; {'modelParameters.utility_k', 1, 5, 0}];
     mcParams = [mcParams; {'modelParameters.utility_m', 1, 2, 0}];
@@ -213,9 +219,36 @@ catch
     mcParams = [mcParams; {'modelParameters.utility_iDiscount', 0, 0.1, 0}];
     mcParams = [mcParams; {'modelParameters.utility_iYears', 10, 20, 1}];
     mcParams = [mcParams; {'modelParameters.remitRate', 0, 20, 0}];
-    mcParams = [mcParams; {'mapParameters.movingCostPerMile', 0, 5000, 0}];
-    mcParams = [mcParams; {'mapParameters.minDistForCost', 0, 50, 0}];
-    mcParams = [mcParams; {'mapParameters.maxDistForCost', 0, 5000, 0}];
+    % DISTANCE COST (revised 2026-08-09).
+    %
+    % These three were INERT until 2026-08-09. createMapFromSHP.m loaded its
+    % cached map with a bare load(), which dropped a saved mapParameters
+    % struct over the live one and discarded every draw made here. Evidence:
+    % across the 17k-run calibration movingCostPerMile scored max|PRCC| =
+    % 0.02 over all 33 outcomes -- 3rd lowest of 69 parameters, level with SD
+    % parameters that readParameters fixes at zero. Migration was free in
+    % every run. Do not compare distance-cost sensitivity from any earlier
+    % set against results from this one.
+    %
+    % Range widened from 0-5. This is the cost of a MAXIMUM-distance (855
+    % mile) move, and with the linear beta(1,1) shape it scales down
+    % proportionally: a median 277-mile move costs 0.32x this value. Against
+    % annual income of 10-25 and layer access costs of 5-20, the old 0-5
+    % ceiling made even a cross-country move cost about a fifth of a year's
+    % income at the top of the range. 2-15 puts a longest move at roughly a
+    % fifth to one full year of income.
+    %
+    % NB this suppresses VOLUNTARY relocation only. choosePortfolio.m:512
+    % gates the credit test on ~distressMode, so distress moves proceed
+    % regardless of wealth -- confirmed in the 2026-08-09 trace, where
+    % creditBlocked was 0.000 across all 611 distress candidates against
+    % 0.665 otherwise. Raising this should raise the signal-to-noise on the
+    % drought response rather than suppress it.
+    mcParams = [mcParams; {'mapParameters.movingCostPerMile', 2, 15, 0}];
+    % minDistForCost and maxDistForCost are no longer sampled. They are now
+    % fixed in readParameters.m at 40 and 860, the observed minimum and
+    % maximum inter-region centroid distances, because they describe the
+    % map rather than agent behaviour. See the note there.
     mcParams = [mcParams; {'networkParameters.networkDistanceSD', 5, 15, 1}];
     mcParams = [mcParams; {'networkParameters.connectionsMean', 1, 5, 1}];
     mcParams = [mcParams; {'networkParameters.connectionsSD', 1, 3, 1}];
@@ -279,7 +312,25 @@ catch
     % roughly two orders of magnitude gives the calibration room to find a
     % value that produces realistic food-insecurity rates against the
     % Harvey et al. (2014) target of ~0.317.
-    mcParams = [mcParams; {'agentParameters.subsistence_costs', 0.1, 10, 0}];
+    % NARROWED 2026-08-12 from [0.5, 3] by DIRECT calibration against the
+    % food-insecurity target, rather than through buildNextRound's composite
+    % score. subsistence_costs -> foodInsecureRate_ag scores PRCC 0.94-0.96,
+    % so it is very nearly exactly identified by that one observable; putting
+    % it into a weighted sum with the migration and ag-participation targets
+    % let runs enter the top 5% while sitting far from the FI target, and the
+    % narrowing applied to this parameter was then driven by parameters that
+    % have nothing to do with it.
+    %
+    % The Set 20 scatter (subsistence_from_summary.jl) crosses the 0.3167
+    % target at subsistence_costs = 2.485. The range is deliberately WIDER
+    % than that point estimate, for two reasons:
+    %   - run-to-run scatter in foodInsecureRate_ag at a fixed subsistence
+    %     value spans roughly 40%, so the crossing is not sharp;
+    %   - the 0.3167 target itself is uncertain. Harvey et al. (2014) surveyed
+    %     600 households in three regions, which need not be representative of
+    %     the national rate.
+    % Treating 2.485 as a precise value would overstate both.
+    mcParams = [mcParams; {'agentParameters.subsistence_costs', 2, 3, 0}];
 
     % Urban income multiplier: scales the mean_utility of every non-ag
     % (localOnly == 0) utility layer for the whole run. The within-ag
@@ -349,9 +400,11 @@ distressParamSpecs = { ...
     'modelParameters.distressShortfallWindowYears',         2,     5,     1,      'C';     ...
     'modelParameters.distressCriticalShortfall',            0.5,   10,    0,      'C';     ...
     'modelParameters.distressStochasticAlpha',              1,     10,    0,      'D';     ...
-    'modelParameters.distressIncomeDropFrac',               0.3,   0.9,   0,      'E';     ...
-    'modelParameters.distressIncomeWindowYears',            2,     5,     1,      'E';     ...
-    'modelParameters.distressCooldownQuarters',             4,     4,     1,      'E';     ...
+    'modelParameters.distressIncomeDropFrac',               0.3,   0.9,   0,      'E,F';   ...
+    'modelParameters.distressIncomeWindowYears',            2,     5,     1,      'E,F';   ...
+    'modelParameters.distressCooldownQuarters',             4,     4,     1,      'E,F,ORACLE'; ...
+    'modelParameters.oracleAgYFThreshold',                  0.8,   0.8,   0,      'ORACLE(7)';  ...
+    'modelParameters.distressShortfallFrac',                0.1,   0.1,   0,      'F';          ...
 };
 
 for k = 1:size(distressParamSpecs, 1)
@@ -425,7 +478,11 @@ if bufferOn
     bufferParamSpecs = { ...
         %  name                                        Lower  Upper  RoundYN
         'modelParameters.bufferAccrualFrac',            0.1,   0.7,   0;   ...
-        'modelParameters.bufferMortalityMax',          0.1,   0.5,   0;   ...
+        'modelParameters.bufferMortalityMax',          0.1,   0.8,   0;   ...
+        % ^ upper bound raised 0.5 -> 0.8 (2026-07-14): agent traces show
+        %   mortMax 0.3 cannot deplete a capped buffer across a 2-year
+        %   drought (cap -> ~0.58 cap), and FEWS 2021 documents herd
+        %   collapses far exceeding 50% -- let calibration decide.
         'modelParameters.bufferCapYears',               0.5,   3.0,   0;   ...
         'modelParameters.bufferFloorYears',             0.0,   0.5,   0;   ...
     };
@@ -442,8 +499,29 @@ if bufferOn
             bufferEnvV, distressArm);
 end
 
+% =============================================================================
+%  LIVELIHOOD ATTACHMENT
+% =============================================================================
+% Heterogeneous per-agent tendency to stay in the current field of work;
+% penalises unfamiliar candidate portfolios in choosePortfolio (bypassed in
+% distressMode). See readParameters.m defaults. Set via SLURM env var, e.g.:
+%   sbatch --export=ALL,LIVELIHOOD_ATTACH=1 HPC/submit_calibration_batch.sh
+% The scale parameter is CALIBRATED (sampled) when the lever is on.
+attachEnvV = str2double(getenv('LIVELIHOOD_ATTACH'));
+attachOn   = ~isnan(attachEnvV) && attachEnvV == 1;
+if attachOn
+    if ~ismember('modelParameters.livelihoodAttachmentEnabled', mcParams.Name)
+        mcParams = [mcParams; {'modelParameters.livelihoodAttachmentEnabled', 1, 1, 1}];
+    end
+    if ~ismember('modelParameters.livelihoodAttachmentScale', mcParams.Name)
+        mcParams = [mcParams; {'modelParameters.livelihoodAttachmentScale', 0.2, 0.8, 0}];
+    end
+    folderParts{end+1} = 'Attach';
+    fprintf('[Livelihood attachment] ENABLED (env LIVELIHOOD_ATTACH=%g); scale sampled [0.2, 0.8].\n', attachEnvV);
+end
+
 % Recompute the output folder if any lever added a suffix.
-if couplingV > 0 || posSpeiV < 1 || bufferOn
+if couplingV > 0 || posSpeiV < 1 || bufferOn || attachOn
     saveDirectory = ['./Outputs_' strjoin(folderParts, '_') '/'];
     if ~exist(saveDirectory, 'dir'); mkdir(saveDirectory); end
     fprintf('[Levers] coupling kappa = %.2f, positive-SPEI scale = %.2f, buffer = %d; outputs -> %s\n', ...
