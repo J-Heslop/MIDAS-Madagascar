@@ -38,7 +38,10 @@ spinupTime  = 10;    % spinup in QUARTERS (= 2.5 years) — readParameters.m com
 spinupSteps = spinupTime;  % already in quarters; do NOT multiply by cycleLength
 
 T = size(output.countAgentsPerLayer, 3);
-yearAxis   = startYear + (0:T-1) / cycleLength;
+% Model time starts at the END of spinup: timestep spinupSteps+1 is
+% calendar startYear (createUtilityLayers.m:750). The previous form
+% counted the spinup quarters as real years, shifting the whole axis.
+yearAxis   = startYear + ((0:T-1) - spinupSteps) / cycleLength;
 postSpinup = spinupSteps+1 : T;
 
 %% 3. Derive population statistics from agentSummary
@@ -97,7 +100,7 @@ subplot(2,1,1);
 plot(yearAxis(postSpinup), aliveApprox(postSpinup), 'k-', 'LineWidth', 2, ...
      'DisplayName', 'Total alive (approx)');
 hold on;
-xline(startYear + spinupTime, '--', 'Color', [0.5 0.5 0.5], ...
+xline(startYear, '--', 'Color', [0.5 0.5 0.5], ...
       'Label','Spinup end', 'LabelHorizontalAlignment','right');
 hold off;
 ylabel('Number of agents');
@@ -122,7 +125,7 @@ if numBornInRun > 0
     plot(yearAxis(postSpinup), birthsPerStep(postSpinup), 'b-', 'LineWidth', 1.5, ...
          'DisplayName', sprintf('Births (uniform approx, %d total)', numBornInRun));
 end
-xline(startYear + spinupTime, '--', 'Color', [0.5 0.5 0.5]);
+xline(startYear, '--', 'Color', [0.5 0.5 0.5]);
 hold off;
 xlabel('Year');
 ylabel('Agents per quarter');

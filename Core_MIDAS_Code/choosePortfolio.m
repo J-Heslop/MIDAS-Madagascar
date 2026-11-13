@@ -9,13 +9,13 @@ function [ agent, moved ] = choosePortfolio( agent, utilityVariables, currentT, 
 %       so the returned best location is guaranteed to be different and
 %       the agent will move (provided at least one other candidate
 %       exists);
-%   (b) skips the credit constraint check, allowing portfolios whose
-%       moving + access costs would normally push the agent past the
-%       creditMultiplier floor to remain in the candidate set. This
-%       represents the empirical reality that distress migration is
-%       typically funded by liquidating household assets (livestock,
-%       grain stores) rather than from accumulated cash savings, which
-%       MIDAS does not model explicitly.
+%   (b) skips the affordability check, allowing portfolios whose moving +
+%       access costs would push the agent into debt to remain in the
+%       candidate set. This represents the empirical reality that distress
+%       migration is typically funded by liquidating household assets
+%       (livestock, grain stores) rather than from accumulated cash
+%       savings, which MIDAS does not model explicitly. Since 2026-09-13
+%       this is the ONLY route by which an agent moves into debt.
 if nargin < 8
     distressMode = false;
 end
@@ -108,7 +108,35 @@ totalNumPortfolios = agent.numBestPortfolio + agent.numRandomPortfolio;
 %create labels for what part of the cycle our historical data and our
 %evaluation period are
 periodInCycleData = mod(1:currentT,modelParameters.cycleLength);
-periodInCycleEvaluation = mod(1:agent.numPeriodsEvaluate,modelParameters.cycleLength);
+
+% SEASONAL ALIGNMENT OF THE FORECAST (fixed 2026-09-11).
+%
+% These labels are matched against each other at the history-sampling step
+% below, so that a blank slot in the forecast is filled from a historical
+% period in the SAME season. periodInCycleData is right: historical timestep t
+% carries season mod(t, cycleLength).
+%
+% This line previously read mod(1:numPeriodsEvaluate, cycleLength), which
+% labels evaluation period 1 as season 1 ALWAYS, whatever quarter the agent is
+% actually in. Evaluation period 1 is the CURRENT quarter, whose season is
+% mod(currentT, cycleLength), so the forecast was filled from history that was
+% phase-shifted by mod(currentT, cycleLength) -- correct in one quarter of
+% four, and up to two quarters out of phase in the others.
+%
+% Layer income is deliberately lumpy (maize Q1, rice Q2, sisal Q3, cassava and
+% vanilla Q4), so a two-quarter shift inverts the forecast: agents expected
+% the harvest when there was none and none when there was. The decision then
+% depended on WHICH QUARTER the agent happened to evaluate in rather than on
+% conditions, which is what produced migration counts alternating by a factor
+% of ~6 between adjacent quarters, and Q1/Q3 patterning together (even shifts
+% preserve the semi-annual phase of the income profile, odd shifts break it).
+%
+% Evaluation period 1 is taken as the current quarter, not the next one:
+% choosePortfolio runs before the income loop in the same timestep, and the
+% access and moving costs are charged to period 1, so the portfolio chosen
+% here earns in this quarter.
+periodInCycleEvaluation = mod(currentT + (0:agent.numPeriodsEvaluate-1), ...
+                              modelParameters.cycleLength);
 
 %set up the discount and risk factors
 
@@ -120,6 +148,11 @@ discountAgeScaling = interp1(demographicVariables.agePointsPref, demographicVari
 discountFactor = 1./((1+agent.discountRate * discountAgeScaling).^(0:agent.numPeriodsEvaluate-1)');
 riskCoeff = 1 - agent.rValue;
 
+% One-shot flag for the non-finite portfolio-value diagnostic below. Declared
+% here rather than at the point of use: MATLAB wants persistent declarations
+% at function scope, not nested inside a conditional in a loop.
+persistent warnedNonFinite
+
 %initialize vectors to hold the best-case portfolios and values for each
 %location
 locationValue = NaN*ones(length(locationList),1);
@@ -128,6 +161,39 @@ locationAspiration = cell(length(locationList),1);
 locationFidelity = cell(length(locationList),1);
 locationAccessCodes = cell(length(locationList),1);
 locationMovingCosts = zeros(length(locationList),1);
+
+% ------------------------------------------------------------------------
+% ASPIRATION vs ABILITY (2026-09-11)
+%
+% locationValue holds the best AFFORDABLE option at each location; the new
+% array below holds the best option regardless of affordability. Separating
+% them is what lets an agent be classified as wanting to move but unable to,
+% rather than being silently converted into something else.
+%
+% THE BEHAVIOUR THIS REPLACES. Previously a location with no affordable option
+% was given -Inf, and every location could end up at -Inf for an indebted
+% agent. sort() then returned them in natural order, the tie-break at the
+% selection step tested locationValue(1) == locationValue(2) -- true, because
+% -Inf == -Inf -- and the agent was sent to a UNIFORMLY RANDOM location, paying
+% a moving cost the credit test had just ruled unaffordable. Insolvency
+% produced random walking rather than immobility, which inflated churn,
+% deepened the debt that caused it, and diluted any drought signal in the
+% migration series with uniform noise.
+locationValueAll  = NaN*ones(length(locationList),1);  % best option, ignoring cost
+% RETIRED 2026-09-13 along with the credit test (see the affordability block
+% below). Asked whether a blocked location would have been reachable under a
+% borrowing allowance rather than a positive-reserve test. With the threshold
+% now zero the two are the same test, so this stays false for every agent and
+% trappedBySignHistory is emitted as all-zeros -- kept as an output only so
+% run_buffer_trace.m and any saved analysis do not fail on a missing field.
+signFreeableAnywhere = false;
+
+% Value of doing exactly what the agent already does: stay put, keep the
+% current portfolio, pay nothing. The mobility classification is defined
+% relative to this. Guaranteed to be populated in non-distress mode because
+% the home location is always in locationList (see above) and the current
+% portfolio is always injected as a candidate there.
+statusQuoValue = -Inf;
 consideredPortfolioSet = []; %List of portfolios considered by agent across all locations in this time step
 
 %Update agent pre-requisites, with special function for education (to
@@ -421,8 +487,27 @@ for indexL = 1:length(locationList)
   
     
     exceedsCreditLimit = false(size(portfolioSubSet,1),1);
-    
-    
+
+    % RETIRED 2026-09-13 -- kept allocated, never written.
+    %
+    % Added 2026-08-27 to measure a real ambiguity: the credit test of the time
+    % demanded a positive cash RESERVE (+creditMultiplier * collateral) while
+    % its own comment described a borrowing ALLOWANCE (-creditMultiplier *
+    % collateral). Which was intended mattered, because it set how much
+    % migration ran through the voluntary channel versus the distress overlay,
+    % so the counterfactual was recorded rather than the code silently patched.
+    %
+    % The question is now moot. Both readings were replaced by a plain
+    % liquidity constraint (threshold zero), under which they are the same
+    % test. This stays all-false so the crows(iC).creditBlockedAllow trace
+    % column keeps its shape; it will read 0 for every row.
+    exceedsCreditAllowance = false(size(portfolioSubSet,1),1);
+
+    % Is this candidate location the agent's current one, and which candidate
+    % (if any) is the status quo? Set per location, before the portfolio loop.
+    isHomeHere   = (locationList(indexL) == agent.matrixLocation);
+    statusQuoIdx = [];
+
     for indexP = 1:size(portfolioSubSet,1)
 
         %dump all layers into a single time series with each element being
@@ -497,36 +582,169 @@ for indexL = 1:length(locationList)
         %add moving costs appropriate to this location
         currentPortfolioValue(1) = currentPortfolioValue(1) - currentMovingCost;
         
-        %identify whether this portfolio is out of reach, due to credit
-        %constraint.  Agent has access to credit proportional to its 'human
-        %capital' - that is, the sum of access costs already paid as a
-        %proxy for self-investment
-        
-        %this should not preclude keeping the current portfolio even if
-        %agent is deeply in debt
+        % AFFORDABILITY: LIQUIDITY, NOT CREDITWORTHINESS (2026-09-13)
         %
-        %In distress mode (overlay), the credit constraint is skipped so
-        %that wealth-depleted agents can still relocate -- mimicking the
-        %asset-liquidation channel that funds real-world distress
-        %migration but is not represented explicitly in MIDAS.
-        if(~distressMode && and(currentMovingCost + newCosts > 0, agent.wealth - currentMovingCost - newCosts < modelParameters.creditMultiplier * sum(utilityVariables.utilityAccessCosts(agent.accessCodesPaid,2))))
+        % A portfolio is out of reach if paying for it would leave the agent in
+        % debt. The household funds a move and any new layer access from the
+        % liquid wealth it holds; it cannot borrow against future income to do
+        % so. That is the whole test.
+        %
+        % WHAT THIS REPLACED, AND WHY.
+        % The previous test was
+        %     postMoveWealth < creditMultiplier * creditCollateral
+        % with creditCollateral = the sum of access costs the agent had ever
+        % paid, described in its own comment as "access to credit proportional
+        % to its human capital ... a proxy for self-investment".
+        %
+        % Two problems.
+        %
+        % (1) CONCEPTUAL. That is a credit-scoring construct -- a household's
+        % borrowing capacity read off its history of formal-sector investment.
+        % Madagascar has no meaningful formal rural consumer credit against
+        % which such a score could be assessed; rural households finance
+        % lumpy expenditure from their own liquid assets, from kin, or from
+        % informal lenders, none of which is what creditCollateral measured.
+        %
+        % (2) MECHANICAL. creditCollateral >= 0, so the test as written blocked
+        % a move unless the agent RETAINED a positive cash reserve afterwards.
+        % It was a reserve requirement, not a borrowing allowance, and it
+        % scaled the wrong way: an agent that had invested MORE in the past had
+        % to hold MORE cash back in order to move. The borrowing-allowance form
+        % the comment actually described was the sign-flipped version sitting
+        % directly below it, which was never used to filter anything.
+        %
+        % Both are gone. creditMultiplier and creditCollateral no longer enter
+        % the migration decision at all. The threshold is zero.
+        %
+        % KEEPING THE CURRENT PORTFOLIO IS UNAFFECTED -- staying put has no
+        % cost, so hasCost is false and an agent already deep in debt is never
+        % forced out of what it already does.
+        %
+        % DISTRESS MODE STILL BYPASSES THIS, unchanged: the overlay represents
+        % the asset-liquidation channel that funds real-world distress
+        % migration, which is not modelled explicitly. That bypass is now the
+        % ONLY route by which an agent moves into debt, which is a cleaner
+        % statement of the distress/voluntary split than the old graded
+        % threshold allowed.
+        %
+        % THIS IS STILL THE CONSTRAINT THE MOBILITY TAXONOMY RESTS ON. It is
+        % what empties portfolioValues, which sets locationValue to -Inf, which
+        % is what makes "wanted to move, could not afford to" expressible at
+        % all. Classes 2 (trapped) and 4 (constrained migrant) are unreachable
+        % without it -- do not remove it outright.
+        postMoveWealth = agent.wealth - currentMovingCost - newCosts;
+        hasCost        = (currentMovingCost + newCosts > 0);
+
+        if(~distressMode && and(hasCost, postMoveWealth < 0))
             exceedsCreditLimit(indexP) = true;
         end
 
         
-        if(and(and(locationList(indexL) == agent.matrixLocation, exceedsCreditLimit == true), sum((portfolioSet{indexP}(1,1:size(utilityVariables.utilityHistory,2)) == agent.currentPortfolio(1,1:size(utilityVariables.utilityHistory,2))) == 0) == 0 ))
-            %New addition - check that this makes sense
-            exceedsCreditLimit(indexP) = false;
-            f=1;
+        % KEEPING WHAT YOU ALREADY HAVE IS ALWAYS AFFORDABLE.
+        % At the home location the candidate matching the agent's current
+        % portfolio involves no move and no unpaid access codes, so hasCost is
+        % false and the test above cannot have fired. Marking it explicitly
+        % guarantees the status quo survives filtering, which is what makes
+        % "stay put" always available and removes the all--Inf state entirely.
+        %
+        % This replaces a clause that (a) indexed portfolioSet with indexP,
+        % which indexes the FILTERED portfolioSubSet, so it compared the wrong
+        % candidate, and (b) tested `exceedsCreditLimit == true` -- the whole
+        % array inside and() rather than the element -- so it only ever fired
+        % when every candidate was blocked.
+        if isHomeHere
+            nLmask = size(utilityVariables.utilityHistory, 2);
+            if all(portfolioSubSet{indexP}(1, 1:nLmask) == ...
+                   agent.currentPortfolio(1, 1:nLmask))
+                exceedsCreditLimit(indexP) = false;
+                statusQuoIdx = indexP;
+            end
         end
         %convert each element to utility using the risk coefficient, and
         %then discount all elements forward to get NPV in utility units
         
         %prospect theory hack - check!!!!
-        vSign = sign(currentPortfolioValue');
+        % ANNUAL AGGREGATION BEFORE THE VALUE FUNCTION (2026-09-04).
+        %
+        % This previously applied the concave CRRA transform to each QUARTER
+        % and then discounted and summed. With u(c) = c^(1-g)/(1-g) that
+        % penalises lumpy income streams severely, and every agricultural
+        % layer in this application is lumpy: quarterShare puts rice in Q2,
+        % maize in Q1, cassava and vanilla in Q4, sisal labour in Q3, while
+        % unskilled and skilled wage layers pay in all four quarters.
+        % quarterShare is normalised, so those livelihoods have IDENTICAL
+        % annual income by construction and differ only in timing -- yet at
+        % the default rValue of 0.85 a single-quarter layer scored 0.31 of an
+        % evenly-paid one, and 0.25 as rValue approached 1.
+        %
+        % Per-period concavity is the canonical intertemporal form and is not
+        % wrong in general. It is wrong HERE because MIDAS applies it to
+        % INCOME rather than consumption, and an agro-pastoral household
+        % smooths a lumpy harvest across the year through grain stores and the
+        % herd. That smoothing exists in this model -- it is the asset buffer
+        % -- but choosePortfolio has no reference to it, so the decision rule
+        % could not see the mechanism that makes lumpy income survivable.
+        %
+        % Summing to the cycle before transforming says the harvest feeds the
+        % household all year, which is what the grain store is for. Two
+        % livelihoods with equal annual income now score equally regardless of
+        % when they pay.
+        %
+        % SIDE EFFECT, deliberate: this also all but removes the non-finite
+        % pathway below. A quarterly zero raised to a negative exponent (any
+        % agent with rValue > 1, and rValueMean is sampled up to 1.5) gives
+        % Inf, and sign(0)*Inf gives NaN. Annual totals are zero only if the
+        % whole portfolio earns nothing for a full year.
+        %
+        % Absolute values shift scale, which is harmless: portfolioValues is
+        % only ever ranked (sorted here, compared across locations below) and
+        % the attachment penalty is multiplicative on |v|. Nothing compares it
+        % to a fixed threshold.
+        cycLen = modelParameters.cycleLength;
+        vQ     = currentPortfolioValue(:);
+        nQ     = numel(vQ);
+        nFull  = floor(nQ / cycLen);
+        nRem   = nQ - nFull * cycLen;
+
+        annualVal  = zeros(nFull + (nRem > 0), 1);
+        annualDisc = zeros(size(annualVal));
+        for iC = 1:nFull
+            idxC = (iC - 1) * cycLen + (1:cycLen);
+            annualVal(iC)  = sum(vQ(idxC));
+            annualDisc(iC) = mean(discountFactor(idxC));
+        end
+        if nRem > 0
+            % Ragged tail: numPeriodsEvaluate is drawn from a mean sampled
+            % 6-24 quarters and is rarely a multiple of four. Scale the tail
+            % to a full-year equivalent so it is comparable with the complete
+            % cycles, then weight its discount by the fraction of the year
+            % actually evaluated. Left unscaled, a 1-3 quarter tail would
+            % reintroduce the same lumpiness bias at the end of the horizon.
+            idxC = nFull * cycLen + (1:nRem);
+            annualVal(end)  = sum(vQ(idxC)) * cycLen / nRem;
+            annualDisc(end) = mean(discountFactor(idxC)) * nRem / cycLen;
+        end
+
+        vSign = sign(annualVal);
         vSign(vSign < 0) = agent.prospectLoss;
-        test3 = currentPortfolioValue';
-        portfolioValues(indexP) = (1/riskCoeff) * (vSign .* (abs(currentPortfolioValue') .^ riskCoeff)) * discountFactor;
+        portfolioValues(indexP) = (1/riskCoeff) * ...
+            (vSign .* (abs(annualVal) .^ riskCoeff))' * annualDisc;
+
+        % NON-FINITE DIAGNOSTIC, not a guard. Reports once per MATLAB session
+        % with enough context to reproduce, so we can establish whether the
+        % zero-income pathway actually fires in practice before deciding
+        % whether it needs clamping. A NaN portfolio value would otherwise
+        % sort unpredictably rather than failing loudly.
+        if ~isfinite(portfolioValues(indexP))
+            if isempty(warnedNonFinite)
+                warnedNonFinite = true;
+                warning('choosePortfolio:nonFiniteValue', ...
+                    ['non-finite portfolio value: rValue=%.3f riskCoeff=%.3f ' ...
+                     'nEval=%d minAnnual=%.4g zeros=%d. Reported once per ' ...
+                     'session.'], agent.rValue, riskCoeff, nQ, ...
+                     min(annualVal), sum(annualVal == 0));
+            end
+        end
 
         % --- Livelihood attachment penalty (see block near top) ---
         % familiarity = fraction of this portfolio's active layers the
@@ -574,10 +792,51 @@ for indexL = 1:length(locationList)
                 crows(iC).attachPenFrac = penC;
                 crows(iC).movingCost    = currentMovingCost;
                 crows(iC).creditBlocked = double(exceedsCreditLimit(iC));
+                % Counterfactual: blocked under the borrowing-allowance sign.
+                % creditBlocked=1 with creditBlockedAllow=0 is a move the
+                % current positive-reserve test forbids and the allowance
+                % reading would permit.
+                crows(iC).creditBlockedAllow = double(exceedsCreditAllowance(iC));
+                crows(iC).wealth        = agent.wealth;
+                crows(iC).postMoveWealth = agent.wealth - currentMovingCost;
                 crows(iC).distressMode  = double(distressMode);
             end
             agentLifeTrace('choice', crows);
         end
+    end
+
+    % RETIRED 2026-09-13, with the credit test it measured.
+    %
+    % This asked whether a blocked option would have been reachable under the
+    % borrowing-allowance sign rather than the positive-reserve sign, i.e. how
+    % much of the trapped population was an artefact of that comparison. The
+    % affordability threshold is now ZERO, so the two readings are the same
+    % test -- postMoveWealth < 0 and postMoveWealth < -0 are identical -- and
+    % the question is answered by construction: none of it.
+    %
+    % PINNED TO false RATHER THAN DELETED. The natural expression
+    %     ~isempty(exceedsCreditAllowance) && ~all(exceedsCreditAllowance)
+    % evaluates to TRUE on the now permanently all-false array, which would set
+    % signFreeableAnywhere for every blocked location and mark EVERY trapped
+    % agent as a sign artefact -- trappedBySignHistory would equal
+    % trappedHistory exactly, and read as "100% artefact". Leaving the line in
+    % place, pinned and explained, is safer than deleting it and leaving the
+    % downstream consumers to be rediscovered.
+    anySurvivesAllowance = false;
+
+    % ASPIRATION: the best this location offers if cost were no object.
+    % Captured BEFORE the filtering below discards unaffordable candidates,
+    % because that is the whole point -- an agent is trapped when the gap
+    % between this and the affordable best is what keeps them in place.
+    if ~isempty(portfolioValues)
+        locationValueAll(indexL) = max(portfolioValues);
+    end
+
+    % The value of doing exactly what the agent already does. Recorded here,
+    % after the attachment penalty has been applied to portfolioValues, so it
+    % is on the same scale as every other candidate.
+    if isHomeHere && ~isempty(statusQuoIdx)
+        statusQuoValue = portfolioValues(statusQuoIdx);
     end
 
     portfolioValues(exceedsCreditLimit) = [];
@@ -586,7 +845,12 @@ for indexL = 1:length(locationList)
 
 
     if(~isempty(portfolioValues))
-        agent.trapped = 0;
+        % NOTE: agent.trapped is NOT set here any more. It used to be assigned
+        % inside this per-location loop, so the value that survived was
+        % whichever the LAST location produced rather than a statement about
+        % the agent -- the reported trapped fraction was measuring the last
+        % entry in locationList. Classification now happens once, after every
+        % location has been evaluated.
 
         %sort them
         [sortedValues,indexSorted] = sort(portfolioValues,'descend');
@@ -600,31 +864,153 @@ for indexL = 1:length(locationList)
         %save the best for current evaluation
         locationValue(indexL) = sortedValues(1);
         locationPortfolio{indexL} = portfolioSubSet{indexSorted(1)};
-        locationAccessCodes{indexL} = portfolioAccessCodes{indexSorted(1)}(1,1:end-2);
+        % NO (1,1:end-2) SLICE (fixed 2026-09-11).
+        %
+        % That idiom is correct for portfolio ROWS, which carry
+        % [layers, duration, fidelity] and so need two trailing columns
+        % trimmed. portfolioAccessCodes holds something different: a logical
+        % COLUMN of length nCodes, built by the reshape at line 568.
+        %
+        % Applying the row idiom to a column made `end` in subscript position 2
+        % equal size(X,2) = 1, so 1:end-2 evaluated to 1:-1 -- empty. Confirmed
+        % in MATLAB: size(x(1,1:end-2)) for x = false(5,1) returns [1 0].
+        %
+        % locationAccessCodes was therefore ALWAYS empty, and at the payment
+        % step below that meant newCosts summed to 0 and
+        % accessCodesPaid(codesToPay) = true was a no-op. Consequences, all
+        % silent: layer access costs were never actually debited from wealth
+        % (only moving costs were); accessCodesPaid never grew beyond what
+        % assignInitialLayers set, so creditCollateral was frozen at its
+        % initial value for the agent's whole life; and because line 569
+        % cancels already-paid codes against that frozen set, agents were
+        % charged full access costs IN THE VALUATION every quarter for layers
+        % they already held, biasing every comparison against their own
+        % current portfolio.
+        locationAccessCodes{indexL} = portfolioAccessCodes{indexSorted(1)};
     else
-        agent.trapped = 1;
-        if(locationList(indexL) == agent.matrixLocation)
-            f=1;
+        % No affordable option at THIS location. -Inf excludes it from
+        % selection; it does not say anything about the agent, which is
+        % decided after the loop once every location has been seen.
+        %
+        % The reserve-vs-allowance diagnostic that used to be encoded here as
+        % trapped == 2 is retained per location, and aggregated below, so
+        % midasMainLoop's trappedBySignHistory keeps its meaning: an agent
+        % counts if ANY location it evaluated would have been reachable under
+        % a borrowing allowance but not under the reserve test.
+        if anySurvivesAllowance
+            signFreeableAnywhere = true;
         end
         locationValue(indexL) = -Inf;
-        locationPortfolio{indexL} = agent.currentPortfolio;  
-    
+        locationPortfolio{indexL} = agent.currentPortfolio;
+        % Column, matching the shape set on the affordable path above and the
+        % shape of agent.accessCodesPaid, so logical indexing behaves the same
+        % way whichever branch produced it.
+        locationAccessCodes{indexL} = false(size(utilityVariables.utilityAccessCodesMat, 1), 1);
     end
     agent.bestPortfolioValues(locationList(indexL)) = locationValue(indexL);
 end
 agent.consideredPortfolios = consideredPortfolioSet;
 
 
-%now identify the best one. 
-[~,indexSorted] = sort(locationValue,'descend');
+% ------------------------------------------------------------------------
+% CHOICE AND MOBILITY CLASSIFICATION (2026-09-11)
+%
+% Agents are sorted into the aspiration/ability categories:
+%
+%   1 voluntarily immobile   nothing beats the status quo; stays, not trapped
+%   2 involuntarily immobile something better exists but nothing better is
+%     (TRAPPED)              affordable; stays with the current portfolio
+%   3 voluntary migrant      moves, and takes the best option available
+%   4 constrained migrant    moves, but the best option was unaffordable and
+%                            it took the best it could pay for
+%   5 distress migrant       routed by the distress overlay, which bypasses
+%                            affordability entirely
+%
+% Selection now ranks ONLY affordable options. Unaffordable locations hold
+% -Inf, and the status quo is always affordable, so the all--Inf state that
+% previously sent insolvent agents to a random location cannot arise. The
+% tie-break is retained for genuine ties between finite values, and is
+% explicitly guarded against -Inf so it can never resurrect that behaviour.
+affordableMask = isfinite(locationValue);
+if ~any(affordableMask)
+    % Defensive: should be unreachable in non-distress mode, since the status
+    % quo is affordable by construction. Staying put is the safe resolution --
+    % never a random destination.
+    choice = find(locationList == currentLocation, 1);
+    if isempty(choice); choice = 1; end
+else
+    candidateValue = locationValue;
+    candidateValue(~affordableMask) = -Inf;
+    [~, indexSorted] = sort(candidateValue, 'descend');
 
+    choice = indexSorted(1);
+    % Randomise among genuine ties only. isfinite() is the guard: without it,
+    % -Inf == -Inf makes every blocked location a "tie".
+    if(length(indexSorted) > 1 && isfinite(candidateValue(indexSorted(1))))
+        if(candidateValue(indexSorted(1)) == candidateValue(indexSorted(2)))
+            temp = find(candidateValue == candidateValue(indexSorted(1)));
+            choice = temp(randperm(length(temp),1));
+        end
+    end
+end
 
-%randomize which of the best is chosen, in the case of a tie
-choice = indexSorted(1);
-if(length(indexSorted) > 1)
-    if(locationValue(indexSorted(1)) == locationValue(indexSorted(2)))
-        temp = find(locationValue == locationValue(indexSorted(1)));
-        choice = temp(randperm(length(temp),1));
+% Classify. Comparisons use a relative tolerance because these are NPVs
+% accumulated over many periods, where exact equality is not meaningful.
+chosenValue   = locationValue(choice);
+bestAspValue  = max(locationValueAll(isfinite(locationValueAll)));
+if isempty(bestAspValue); bestAspValue = -Inf; end
+% Scale the tolerance from the FINITE values only. chosenValue is -Inf in the
+% defensive stay-put branch, and statusQuoValue remains -Inf whenever the
+% status-quo candidate was not matched in portfolioSubSet -- it is deduplicated
+% by unique(...,'rows') and masked by selectableHere, so a match is likely but
+% not guaranteed. abs(-Inf) would make valTol = Inf, and every comparison of
+% the form "bestAsp > chosen + valTol" false, so classes 2 and 4 would never be
+% recorded and the classification would silently collapse to "stayed" or
+% "moved" with no trapped or constrained agents at all.
+tolBasis = [chosenValue bestAspValue statusQuoValue];
+tolBasis = tolBasis(isfinite(tolBasis));
+if isempty(tolBasis)
+    valTol = 1e-9;
+else
+    valTol = 1e-9 * max(1, max(abs(tolBasis)));
+end
+
+agentMoves = (locationList(choice) ~= currentLocation);
+if distressMode
+    agent.mobilityClass = 5;
+    agent.trapped = 0;
+elseif agentMoves
+    % Took the best available. Constrained if something better existed that
+    % the agent could not pay for.
+    if bestAspValue > chosenValue + valTol
+        agent.mobilityClass = 4;
+    else
+        agent.mobilityClass = 3;
+    end
+    agent.trapped = 0;
+else
+    % Stayed. Trapped only if a strictly better option existed somewhere and
+    % was unaffordable -- an agent content where it is, is not trapped however
+    % poor it is, which is the distinction the previous code could not make.
+    if bestAspValue > chosenValue + valTol
+        agent.mobilityClass = 2;
+        % trapped = 1 ALWAYS from 2026-09-13. The value 2 used to mark an agent
+        % trapped only by the sign of the credit test, which a borrowing
+        % allowance would have freed. With the affordability threshold now zero
+        % that distinction does not exist: a trapped agent cannot fund the move
+        % from liquid wealth, full stop. signFreeableAnywhere is pinned false,
+        % so this branch resolves to 1 for every agent.
+        %
+        % trappedHistory keys on > 0 and is therefore UNCHANGED in meaning.
+        % trappedBySignHistory keys on == 2 and is now always zero.
+        if signFreeableAnywhere
+            agent.trapped = 2;
+        else
+            agent.trapped = 1;
+        end
+    else
+        agent.mobilityClass = 1;
+        agent.trapped = 0;
     end
 end
 
@@ -667,7 +1053,14 @@ if(currentLocation ~= bestLocation)
 end
 
 %pay any access costs necessary to make use of this layer
-codesToPay = locationAccessCodes{indexSorted(1)};
+% `choice`, not indexSorted(1). The two differ whenever the tie-break picked a
+% different location among equals, and now also whenever the defensive
+% stay-put branch above set choice without sorting at all. Using indexSorted(1)
+% charged the agent for the access codes of a location it did not go to, and
+% recorded those codes as paid, so it could later enter layers it had never
+% bought into. locationPortfolio and locationMovingCosts have always been
+% indexed by `choice`; this line was the odd one out.
+codesToPay = locationAccessCodes{choice};
 newCosts = sum(utilityVariables.utilityAccessCosts(codesToPay,2));
 agent.wealth = agent.wealth - newCosts;
 agent.accessCodesPaid(codesToPay) = true;

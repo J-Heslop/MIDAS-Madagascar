@@ -153,5 +153,9 @@ end
 end
 
 function saveToFile(input, output, filename);
-    save(filename,'input', 'output');
+    % -v7.3 for the same reason as the parallel runner: the default v7 format
+    % caps a single variable at 2 GB uncompressed, silently skips `output`
+    % with only a warning when exceeded, and leaves a ~3 kB file that looks
+    % like a successful save. See saveToFile in runMIDASExperiment_parallel.m.
+    save(filename, 'input', 'output', '-v7.3');
 end

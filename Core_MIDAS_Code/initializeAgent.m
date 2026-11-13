@@ -37,6 +37,43 @@ else
 end
 
 
+% STAGGERED DISTRESS COOLDOWN (2026-09-11).
+%
+% Agent.m defaults lastDistressMoveT to -9999, so every agent's cooldown is
+% clear from the first timestep. postSpin then turns true for the whole
+% population simultaneously, and every agent meeting the shortfall condition
+% fires in the SAME quarter. distressCooldownQuarters = 4 equals the annual
+% cycle, so each of them becomes eligible again in precisely that quarter the
+% following year: the cohort stays phase-locked for the rest of the run.
+%
+% Observed in the 2026-09-11 trace: cooldownOK for 10 of 10 traced agents at
+% t = 11 and again at t = 15, with 721 of 1642 agents moving in that single
+% quarter. The trigger itself was correct -- every firing agent had a genuine
+% shortfall above threshold -- but the TIMING was an artefact, set by when
+% spinup happened to end rather than by anything agricultural. Changing
+% spinupTime moved the spike.
+%
+% Drawing the initial value across one cooldown window ending at the end of
+% spinup spreads first eligibility over timesteps spinupTime+1 .. spinupTime+cd
+% instead of concentrating it on spinupTime+1. There is no reason for every
+% household in the Grand Sud to become able to move on the same day, and the
+% annual totals are unaffected -- only their distribution within the year.
+%
+% Newborns are created through this same function; for them the value lies far
+% in the past by the time they reach ageDecision, so cooldownOK is true on
+% their first eligible quarter exactly as with -9999. The draw is
+% unconditional so that runs with and without the distress overlay consume the
+% same random stream and stay comparable.
+cdQ = 4;
+if isfield(modelParameters, 'distressCooldownQuarters')
+    cdQ = max(1, round(modelParameters.distressCooldownQuarters));
+end
+spinQ = 0;
+if isfield(modelParameters, 'spinupTime')
+    spinQ = modelParameters.spinupTime;
+end
+newAgent.lastDistressMoveT = spinQ + 1 - cdQ + randi([0, cdQ - 1]);
+
 newAgent.accessCodesPaid = agentParameters.init_accessCodesPaid;
 newAgent.knowsIncomeLocation = agentParameters.init_knowsIncomeLocation;
 newAgent.scratch = sparse(agentParameters.init_incomeLayersHistory(:));
@@ -61,6 +98,9 @@ newAgent.wealthHistory = cell(size(modelParameters.timeSteps,1));
 % grant in midasMainLoop.m -- not at birth.
 newAgent.buffer = 0;
 newAgent.farmBufferGranted = false;
+newAgent.nonAgBufferGranted = false;
+newAgent.parentID = 0;
+newAgent.children = [];
 newAgent.bufferHistory = cell(size(modelParameters.timeSteps,1));
 newAgent.agIncomeYTD = 0;   % annual ag-income accumulator (see Agent.m)
 newAgent.lastShortfall = 0; % unmet year-end consumption shortfall (Variant F; see Agent.m)
@@ -82,9 +122,16 @@ newAgent.bestPortfolioValues = zeros(size(utilityVariables.utilityHistory,1),num
 newAgent.consideredPortfolios = [];
 newAgent.training = false(size(utilityVariables.utilityLayerFunctions,1),1);
 newAgent.experience = zeros(size(utilityVariables.utilityLayerFunctions,1),1);
-newAgent.consideredHistory = cell(size(modelParameters.timeSteps,1));
-newAgent.agentPortfolioHistory = cell(size(modelParameters.timeSteps,1));
-newAgent.agentAspirationHistory = cell(size(modelParameters.timeSteps,1));
+% Per-agent trace arrays, allocated only when modelParameters.agentTraceOn.
+% Left empty otherwise: nothing in the model reads them, and every agent
+% created over a 100-year run pays for the allocation. See readParameters.m.
+% (newAgent.wealthHistory above is always allocated -- checkDistressTrigger
+% reads it, so it is model state rather than diagnostics.)
+if isfield(modelParameters, 'agentTraceOn') && modelParameters.agentTraceOn
+    newAgent.consideredHistory = cell(size(modelParameters.timeSteps,1));
+    newAgent.agentPortfolioHistory = cell(size(modelParameters.timeSteps,1));
+    newAgent.agentAspirationHistory = cell(size(modelParameters.timeSteps,1));
+end
 newAgent.pInteract = pInteract;
 newAgent.pMeetNew = pMeetNew;
 newAgent.pAddFitElement = pAddFitElement;

@@ -1,4 +1,4 @@
-function [ utilityLayerFunctions, utilityHistory, utilityAccessCosts, utilityTimeConstraints, utilityDuration, utilityAccessCodesMat, utilityPrereqs, utilityBaseLayers, utilityForms, incomeForms, nExpected, hardSlotCountYN, localOnly, nExpectedFrac, spatiallyRestricted, agYF ] = createUtilityLayers(locations, modelParameters, demographicVariables )
+function [ utilityLayerFunctions, utilityHistory, utilityAccessCosts, utilityTimeConstraints, utilityDuration, utilityAccessCodesMat, utilityPrereqs, utilityBaseLayers, utilityForms, incomeForms, nExpected, hardSlotCountYN, localOnly, nExpectedFrac, spatiallyRestricted, agYF, droughtStatesOut ] = createUtilityLayers(locations, modelParameters, demographicVariables )
 %createUtilityLayers builds all utility layer arrays from a CSV definition file.
 %
 % The CSV path is set by modelParameters.utilityLayersFile.
@@ -158,6 +158,19 @@ quarterShare(isnan(quarterShare)) = 0;
 % utility_layers_v1.csv for that purpose.
 
 nSimYears = timeSteps / modelParameters.cycleLength;
+
+% DROUGHT STATE SEQUENCE, exported for diagnostics and figures (2026-09-03).
+% Initialised unconditionally so the output always exists: the Markov block
+% below is gated on droughtVariabilityOn, and a caller requesting this output
+% with variability off would otherwise get an "undefined variable" error
+% rather than an empty array it can test.
+% 1 = drought, 0 = normal, per location per simulation year. NOTE that the
+% chain is simulated across the WHOLE window but only APPLIED from
+% firstProjCyc onward -- the observation period uses measured SPEI instead --
+% so pre-2023 columns are generated and unused. Anything plotting these should
+% either restrict to the projection period or say which regime each column
+% belongs to.
+droughtStatesOut = zeros(numel(locations.matrixID), nSimYears);
 firstYear = modelParameters.startYear;
 
 % yieldFactor(iLoc, iL, iCyc): default 1.0 (no drought effect)
@@ -167,9 +180,32 @@ yieldFactor = ones(nLoc, nLayers, nSimYears);
 grmaDataDir = fileparts(modelParameters.utilityLayersFile);
 
 % Resolve which location-name field the locations table carries
+% REGION NAME SOURCE (hardened 2026-09-03).
+%
+% Every drought lookup in this file -- GRMA yield surfaces, observed SPEI,
+% Markov parameters, correlation matrix -- keys on these strings. Getting them
+% from the wrong shapefile field silently removes regions from the drought
+% forcing: yieldFactor is initialised to ones(), and unmatched locations are
+% simply never written, so they run with NO drought of any kind while every
+% output still looks well formed.
+%
+% That is not hypothetical. ADM2_FR is a 15-character DBF field holding
+% TRUNCATED names -- 'Vatovavy Fitovi' for 'Vatovavy Fitovinany',
+% 'Atsimo-Andrefan' for 'Atsimo-Andrefana'. Exactly two of the 22 region names
+% exceed 15 characters, so falling back to ADM2_FR silently drops those two,
+% one of which (Atsimo-Andrefana) is a Grand Sud study region.
+%
+% Prefer NAME_2, and if it is absent, refuse to guess quietly: any candidate
+% whose values are capped at 15 characters is reported before use.
 if ismember('source_NAME_2', locations.Properties.VariableNames)
     locNamesGrma = string(locations.source_NAME_2);
 elseif ismember('source_ADM2_FR', locations.Properties.VariableNames)
+    warning('createUtilityLayers:truncatedNames', ...
+            ['source_NAME_2 absent; falling back to source_ADM2_FR, which is a ' ...
+             '15-character field and TRUNCATES long region names. Region matching ' ...
+             'will fail for any name longer than 15 characters. This usually means ' ...
+             'the locations table came from a stale Admin_2_lat_lon.mat cache -- ' ...
+             'delete it to force a shapefile re-read.']);
     locNamesGrma = string(locations.source_ADM2_FR);
 else
     srcFlds = locations.Properties.VariableNames( ...
@@ -183,6 +219,38 @@ grmaLayerIdx = [];
 if hasGrmaCol
     grmaLayerIdx = find(~ismissing(layerDefs.grma_crop) & layerDefs.grma_crop ~= "");
 end
+
+% -------------------------------------------------------------------------
+% NO PER-LAYER DROUGHT SENSITIVITY COEFFICIENT -- deliberate (2026-09-05)
+%
+% The interannual perturbation is scaled by droughtScaleFactor alone, the
+% same for every agricultural layer. A drought_k column existed in
+% utility_layers_v1.csv (maize 0.45, rice_south 0.40, rice_north 0.25,
+% cassava 0.15) and was briefly wired in here on the belief that it carried
+% GRMA's per-crop drought sensitivity. It did not, and it has been removed
+% from the CSV so that nobody repeats the mistake.
+%
+% What GRMA actually specifies:
+%   sigmoid slope k   0.10 maize, 0.10 cassava, 0.09 rice, 0.08 groundnut
+%   Ky (FAO)          1.2  maize, 1.2  cassava, 1.1  rice, 0.7  groundnut
+% Maize and cassava are IDENTICAL on both. GRMA differentiates crops through
+% water needs and the Kc curve, not through a sensitivity coefficient -- and
+% that differentiation is already present in the yield surfaces this module
+% reads. Adding a second per-crop coefficient here would either duplicate it
+% or contradict it.
+%
+% The evidence for a cassava/maize ratio, none of it supporting 0.33:
+%   GRMA k and Ky                         1.00
+%   GRMA surfaces, Grand Sud secular      1.14  (cassava declines MORE)
+%   GRMA surfaces, national secular       0.73
+%   observed 2016 Androy losses           ~0.6-0.9  (maize -80%, cassava -50%)
+% The last is the only one measuring a single-year response, and it rests on
+% one event. Given GRMA already differentiates the crops, a flat coefficient
+% is the fewest-assumptions choice at this level of assessment.
+%
+% Per-crop differences in the perturbation therefore come from the SPEI
+% sampling month alone (rice_north 4, rice_south 6, maize 2, cassava 3),
+% which is where the physical difference between growing seasons belongs.
 
 if ~isempty(grmaLayerIdx)
     % Load each unique crop file once and cache in a struct
@@ -272,10 +340,51 @@ end
 % observed historical migration responses. The learned value carries
 % forward unchanged into the Markov-driven projection-period drought.
 
-obsSpeiFile = fullfile(grmaDataDir, 'observed_spei_harvest.csv');
+% Defined at function scope, not inside the observed-SPEI block, because the
+% Markov block below needs OBS_LAST_YEAR to know where the observed record
+% stops and synthetic variability must take over. Leaving it local to the
+% `if` was how the two blocks came to overlap.
+OBS_FIRST_YEAR = 1985;
+OBS_LAST_YEAR  = 2022;
+
+% SPEI FILE IS TIED TO THE LAYER FILE (2026-09-13).
+%
+% The lookup below keys on LAYER NAME (sprintf('%s_y%d', layerName, yr)), so a
+% layer file and a SPEI file that disagree about names produce a run in which
+% the ag layers receive NO drought perturbation -- and the old code failed
+% silently, via a bare `continue`, so that run looked entirely plausible. The
+% two files are therefore resolved together:
+%
+%   utility_layers_v1.csv -> observed_spei_harvest.csv     (unsuffixed, legacy)
+%   utility_layers_v<N>.csv -> observed_spei_harvest_v<N>.csv
+%   anything else         -> observed_spei_harvest.csv
+%
+% NO CROSS-VERSION FALLBACK. If the suffixed file is missing this errors rather
+% than quietly loading the v1 table, whose column names would miss on every
+% lookup.
+[~, layerStem] = fileparts(modelParameters.utilityLayersFile);
+verTok = regexp(layerStem, '_v(\d+)$', 'tokens', 'once');
+if isempty(verTok) || strcmp(verTok{1}, '1')
+    obsSpeiFile = fullfile(grmaDataDir, 'observed_spei_harvest.csv');
+else
+    obsSpeiFile = fullfile(grmaDataDir, ...
+                           sprintf('observed_spei_harvest_v%s.csv', verTok{1}));
+    if exist(obsSpeiFile, 'file') ~= 2
+        error('createUtilityLayers:speiFileMissing', ...
+            ['Layer file %s implies %s, which does not exist.\n\n' ...
+             'Generate it with:\n' ...
+             '    python apply_observed_drought.py --layers %s \\\n' ...
+             '                                     --out    %s\n\n' ...
+             'Refusing to fall back to observed_spei_harvest.csv: its columns ' ...
+             'are named for the v1 layers, so every lookup would miss and the ' ...
+             'run would proceed with NO observed drought forcing.'], ...
+            modelParameters.utilityLayersFile, obsSpeiFile, ...
+            modelParameters.utilityLayersFile, obsSpeiFile);
+    end
+end
+fprintf('createUtilityLayers: observed SPEI source = %s\n', obsSpeiFile);
+
 if exist(obsSpeiFile, 'file') && isfield(modelParameters, 'droughtScaleFactor')
-    OBS_FIRST_YEAR = 1985;
-    OBS_LAST_YEAR  = 2022;
 
     OS = readtable(obsSpeiFile, 'TextType', 'string', 'VariableNamingRule', 'preserve');
     obsRegionNames = string(OS{:, 1});
@@ -294,6 +403,7 @@ if exist(obsSpeiFile, 'file') && isfield(modelParameters, 'droughtScaleFactor')
     % For each ag layer with a grma_crop, look up its per-year observed
     % SPEI column and apply the perturbation onto yieldFactor.
     nObsLayers = 0;
+    missedLayers = strings(0, 1);   % layers with no matching column at all
     for iL = grmaLayerIdx'
         layerName = char(layerDefs.name(iL));
         minYld    = double(layerDefs.drought_min_yield(iL));
@@ -342,7 +452,32 @@ if exist(obsSpeiFile, 'file') && isfield(modelParameters, 'droughtScaleFactor')
         end
         if anyYearApplied
             nObsLayers = nObsLayers + 1;
+        else
+            missedLayers(end+1, 1) = string(layerName); %#ok<AGROW>
         end
+    end
+
+    % A LAYER THAT MATCHED NOTHING IS A HARD ERROR (2026-09-13).
+    %
+    % The per-year lookup above skips a missing column with a bare `continue`,
+    % which is right for an individual year outside the record but catastrophic
+    % when it happens for EVERY year of a layer: that layer then runs with no
+    % observed drought forcing whatsoever, and the only trace is a count in an
+    % fprintf that nobody reads. It is the exact failure mode that a renamed
+    % layer set produces, so it fails the run instead.
+    if ~isempty(missedLayers)
+        error('createUtilityLayers:speiLayerMismatch', ...
+            ['No observed-SPEI columns found for layer(s): %s\n\n' ...
+             'Layer file: %s\nSPEI file:  %s\n\n' ...
+             'The SPEI table is keyed by LAYER NAME, so these layers would run ' ...
+             'with NO observed drought forcing for %d-%d while the others were ' ...
+             'perturbed normally -- a silently half-forced model. Regenerate ' ...
+             'the SPEI table for this layer set:\n' ...
+             '    python apply_observed_drought.py --layers %s --out %s'], ...
+            strjoin(cellstr(missedLayers), ', '), ...
+            modelParameters.utilityLayersFile, obsSpeiFile, ...
+            OBS_FIRST_YEAR, OBS_LAST_YEAR, ...
+            modelParameters.utilityLayersFile, obsSpeiFile);
     end
 
     fprintf(['createUtilityLayers: observed SPEI drought applied to %d ' ...
@@ -388,6 +523,12 @@ if isfield(modelParameters, 'droughtVariabilityOn') && modelParameters.droughtVa
         % Load Markov parameter table
         MP = readtable(markovFile, 'TextType', 'string');
 
+        % First simulation cycle the synthetic chain is allowed to touch.
+        % Observed ERA5 SPEI drives everything up to OBS_LAST_YEAR; the chain
+        % takes over the year after. Hoisted out of the per-layer loop below
+        % so the summary fprintf can reference it even if no layer qualifies.
+        firstProjCyc = max(1, OBS_LAST_YEAR - firstYear + 2);
+
         % ----------------------------------------------------------------
         % STEP 1: Pre-generate drought state sequence (nLoc x nSimYears)
         % using one shared spatial correlation matrix (average across crop
@@ -419,8 +560,16 @@ if isfield(modelParameters, 'droughtVariabilityOn') && modelParameters.droughtVa
             end
         end
 
-        % Load shared spatial correlation matrix
-        sharedCorrFile = fullfile(grmaDataDir, 'spei6_corr_shared.csv');
+        % Load shared spatial correlation matrix. Versioned with the layer
+        % file for the same reason as the SPEI table above: it is the mean of
+        % the PER-LAYER matrices, so a v1 file describes a different set of
+        % layers. verTok was resolved from the layer filename earlier.
+        if isempty(verTok) || strcmp(verTok{1}, '1')
+            sharedCorrFile = fullfile(grmaDataDir, 'spei6_corr_shared.csv');
+        else
+            sharedCorrFile = fullfile(grmaDataDir, ...
+                sprintf('spei6_corr_shared_v%s.csv', verTok{1}));
+        end
         useCorr = false;
         if exist(sharedCorrFile, 'file')
             CT          = readtable(sharedCorrFile, 'ReadRowNames', true, 'TextType', 'string');
@@ -431,6 +580,49 @@ if isfield(modelParameters, 'droughtVariabilityOn') && modelParameters.droughtVa
                 idx = find(corrRegions == locNamesGrma(iLoc), 1);
                 if ~isempty(idx); locToCorrRow(iLoc) = idx; end
             end
+
+    
+            % INTEGRITY CHECK (2026-09-03). A location that fails EITHER lookup -- the
+            % Markov parameter table or the shared correlation matrix -- is dropped from
+            % validIdx and therefore never has its drought state updated. Its state stays
+            % at the initial draw for the whole run, which for an unmatched region is
+            % zero: permanently drought-free, silently, with no error and no warning.
+            %
+            % All 22 regions currently match byte-for-byte across drought_markov_params.csv,
+            % spei6_corr_shared.csv, the GRMA yield surfaces and the shapefile, so this
+            % should never fire. It exists because the failure mode is invisible: a
+            % renamed region, a re-exported shapefile or an added district would remove a
+            % region from the drought forcing without anything in the output looking wrong.
+            % Given the Grand Sud is the study focus, losing one of those three silently
+            % would invalidate the campaign.
+            badParam = find(~hasParams);
+            badCorr  = find(hasParams & locToCorrRow <= 0);
+            if ~isempty(badParam) || ~isempty(badCorr)
+                msg = 'Drought chain would silently exclude locations:';
+                for iB = badParam(:)'
+                    msg = sprintf('%s\n  %s: no row in %s for layer %s', msg, ...
+                                  locNamesGrma(iB), modelParameters.droughtMarkovFile, refLayer);
+                end
+                for iB = badCorr(:)'
+                    msg = sprintf('%s\n  %s: no row in spei6_corr_shared.csv', msg, ...
+                                  locNamesGrma(iB));
+                end
+                error('createUtilityLayers:unmatchedDroughtRegion', '%s', msg);
+            end
+
+            % POSITIVE CONFIRMATION. The check above is silent on success,
+            % which means a clean log is indistinguishable from a log where
+            % the check never ran -- e.g. an older copy of this file on a
+            % cluster node. Print the count so "all regions forced" is an
+            % observed fact in the run log rather than an absence of
+            % complaint. On the HPC this is greppable across every task.
+            % Counted from hasParams/locToCorrRow rather than validIdx, which
+            % is not assigned until the next line -- an earlier version
+            % referenced it here and failed with "Unrecognized function or
+            % variable 'validIdx'".
+            fprintf(['createUtilityLayers: drought forcing matched for %d of %d ' ...
+                     'regions (Markov params + correlation matrix).\n'], ...
+                    sum(hasParams & locToCorrRow > 0), nLoc);
 
             validIdx = find(hasParams & locToCorrRow > 0);
             nValid   = numel(validIdx);
@@ -484,6 +676,7 @@ if isfield(modelParameters, 'droughtVariabilityOn') && modelParameters.droughtVa
             end
             droughtStates(:, iCyc) = state_vec;
         end
+        droughtStatesOut = droughtStates;
 
         % ----------------------------------------------------------------
         % STEP 2: Apply layer-specific yield perturbations using the
@@ -496,19 +689,74 @@ if isfield(modelParameters, 'droughtVariabilityOn') && modelParameters.droughtVa
             layerName = char(layerDefs.name(iL));
             layerRows = MP(MP.layer == layerName, :);
             if isempty(layerRows)
-                warning('createUtilityLayers: no Markov params for layer "%s". Skipping.', layerName);
-                continue;
+                % HARD ERROR from 2026-09-13; this was a warning.
+                %
+                % A warning is not enough. Skipping leaves this layer with NO
+                % projection-period drought variability while every other ag
+                % layer is perturbed normally -- a half-forced model whose
+                % output looks entirely reasonable. It is also precisely what a
+                % RENAMED layer set produces against a stale parameter table,
+                % which is the likeliest way to arrive here.
+                error('createUtilityLayers:markovLayerMissing', ...
+                    ['No Markov drought parameters for layer "%s".\n\n' ...
+                     'Layer file:  %s\nMarkov file: %s\n\n' ...
+                     'The table is keyed by layer name. Regenerate it for this ' ...
+                     'layer set:\n' ...
+                     '    python derive_drought_markov_params.py \\\n' ...
+                     '        --layers %s \\\n' ...
+                     '        --obs <matching observed_spei_harvest> \\\n' ...
+                     '        --suffix _v<N>'], ...
+                    layerName, modelParameters.utilityLayersFile, ...
+                    markovFile, modelParameters.utilityLayersFile);
             end
 
-            % Build per-location SPEI6 distribution vectors for this layer
+            % Build per-location SPEI6 distribution vectors for this layer,
+            % for BOTH chain states.
+            %
+            % NORMAL-STATE SAMPLING ADDED 2026-09-03. Previously only the
+            % drought-state moments were read, and normal years received
+            % delta = 0 exactly. Three things followed, none intended:
+            %
+            %  (1) The GRMA secular trajectory became a hard CEILING, touched
+            %      exactly in every normal year, which is visible in the
+            %      supplemental drought figure as a smooth declining upper
+            %      envelope and is not a defensible representation of yield.
+            %  (2) The projection mean sat systematically BELOW the GRMA
+            %      climatological mean by prevalence x mean drought delta --
+            %      roughly 0.13 of yield factor in the south at scaleFactor
+            %      0.30 -- so projections were more pessimistic than the
+            %      underlying climate data intends.
+            %  (3) Yields never exceeded the mean, so households never had a
+            %      surplus year in which to rebuild the herd. Since buffer
+            %      accrual comes from surplus, this slowed recovery and
+            %      therefore biased the very compounding mechanism the buffer
+            %      exists to represent.
+            %
+            % The observation period never had this problem: it applies
+            % droughtScaleFactor * observed SPEI to EVERY year, and observed
+            % SPEI is positive in wet years. The projection was one-sided
+            % where the observation period was two-sided.
+            %
+            % normal_spei_mean and normal_spei_std were already present in
+            % drought_markov_params.csv and read by nothing, which suggests
+            % two-sided sampling was the original intent. SPEI is
+            % standardised, so prevalence-weighted the two states very nearly
+            % cancel (0.216 x -1.193 + 0.784 x 0.268 = -0.048 for
+            % Alaotra-Mangoro), restoring a near-zero mean perturbation.
             mu_d_vec = zeros(nLoc, 1);
             sd_d_vec = ones(nLoc, 1);
+            mu_n_vec = zeros(nLoc, 1);
+            sd_n_vec = ones(nLoc, 1);
 
             for iLoc = 1:nLoc
                 rowIdx = find(layerRows.region == locNamesGrma(iLoc), 1);
                 if ~isempty(rowIdx)
                     mu_d_vec(iLoc) = layerRows.drought_spei_mean(rowIdx);
                     sd_d_vec(iLoc) = layerRows.drought_spei_std(rowIdx);
+                    if ismember('normal_spei_mean', layerRows.Properties.VariableNames)
+                        mu_n_vec(iLoc) = layerRows.normal_spei_mean(rowIdx);
+                        sd_n_vec(iLoc) = layerRows.normal_spei_std(rowIdx);
+                    end
                 end
             end
 
@@ -523,16 +771,50 @@ if isfield(modelParameters, 'droughtVariabilityOn') && modelParameters.droughtVa
             minYld = double(layerDefs.drought_min_yield(iL));
             if isnan(minYld); minYld = 0.0; end
 
-            % Apply perturbations: drought state is shared, magnitude is layer-specific
-            for iCyc = 1:nSimYears
+            % Apply perturbations: drought state is shared, magnitude is layer-specific.
+            %
+            % PROJECTION YEARS ONLY (2026-08-26). This loop previously ran
+            % 1:nSimYears, i.e. the whole 1985-2085 window. The observed-SPEI
+            % block above already perturbs 1985-2022 using the measured ERA5
+            % record, so running the Markov chain over the same years stacked a
+            % synthetic drought on top of a real one and doubled the variance
+            % across the very period droughtScaleFactor was calibrated against.
+            %
+            % Observed record drives 1985-2022; the chain takes over from 2023.
+            % The two use the SAME transfer function -- yield delta =
+            % droughtScaleFactor * SPEI6 -- so the calibrated coupling carries
+            % forward and only the source of SPEI6 changes.
+            %
+            % NOTE for the methods section: p_DD and p_ND in
+            % drought_markov_params.csv are fixed constants estimated over
+            % 1985-2022. The chain is therefore STATIONARY -- it produces
+            % interannual variability, not rising drought frequency. Any trend
+            % in drought impact comes from the GRMA mean-yield decline, which
+            % is SSP-specific. Describing the projections as having
+            % "increasing drought prevalence" would misstate the mechanism.
+            for iCyc = firstProjCyc:nSimYears
                 for iLoc = 1:nLoc
                     if ~hasParams(iLoc); continue; end
+                    % TWO-SIDED (2026-09-03). Sample SPEI6 from the state's own
+                    % distribution: negative in drought, positive on average in
+                    % normal years. Previously normal years received delta = 0,
+                    % which made the GRMA trajectory an artificial ceiling and
+                    % removed every above-average harvest from the projection.
                     if droughtStates(iLoc, iCyc) == 1
                         spei6_sample = mu_d_vec(iLoc) + sd_d_vec(iLoc) * randn();
-                        delta = scaleFac * spei6_sample;   % SPEI6 negative in drought → negative delta
                     else
-                        delta = 0;
+                        spei6_sample = mu_n_vec(iLoc) + sd_n_vec(iLoc) * randn();
                     end
+
+                    % Positive-SPEI scaling, applied on the same terms as in
+                    % the observation period above, so the two regimes treat
+                    % above-trend years identically. Default 1 = symmetric.
+                    if spei6_sample > 0 && ...
+                       isfield(modelParameters, 'droughtPositiveSPEIScale')
+                        spei6_sample = modelParameters.droughtPositiveSPEIScale * spei6_sample;
+                    end
+
+                    delta = scaleFac * spei6_sample;
                     yieldFactor(iLoc, iL, iCyc) = ...
                         min(1.0, max(minYld, yieldFactor(iLoc, iL, iCyc) + delta));
                 end
@@ -541,8 +823,11 @@ if isfield(modelParameters, 'droughtVariabilityOn') && modelParameters.droughtVa
         end
 
         fprintf(['createUtilityLayers: drought Markov variability applied to %d layer(s) ' ...
-                 '[scaleFactor=%.3f, spatialCorr=%d, sharedState=true].\n'], ...
-                 nMarkovApplied, scaleFac, useCorr);
+                 '[scaleFactor=%.3f, spatialCorr=%d, sharedState=true, ' ...
+                 'years %d-%d (cycles %d-%d)].\n'], ...
+                 nMarkovApplied, scaleFac, useCorr, ...
+                 firstYear + firstProjCyc - 1, firstYear + nSimYears - 1, ...
+                 firstProjCyc, nSimYears);
     end
 end
 

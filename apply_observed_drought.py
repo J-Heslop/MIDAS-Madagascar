@@ -55,9 +55,39 @@ import csv
 # Configuration
 # ---------------------------------------------------------------------------
 SCRIPT_DIR     = os.path.dirname(os.path.abspath(__file__))
-CEDA_SPEI_CSV  = ("C:\\Users\\Jack\\OneDrive - University of East Anglia\\"
-                  "ISF - Migration modelling consultancy\\Datasets\\CEDA_SPEI.csv")
 DATA_DIR       = os.path.join(SCRIPT_DIR, 'Data')
+# CEDA source. The consultancy folder is preferred because it is the original,
+# but a copy lives in Data/ and is used when that path is unavailable -- which
+# it always is on the cluster, and on any machine that is not Jack's. Hard-
+# coding the Windows path alone made this script unrunnable anywhere else,
+# which is part of why the derived drought files drifted out of step with
+# utility_layers_v1.csv.
+_CEDA_CANDIDATES = [
+    ("C:\\Users\\Jack\\OneDrive - University of East Anglia\\"
+     "ISF - Migration modelling consultancy\\Datasets\\CEDA_SPEI.csv"),
+    os.path.join(SCRIPT_DIR, '..', 'ISF - Migration modelling consultancy',
+                 'Datasets', 'CEDA_SPEI.csv'),
+    os.path.join(DATA_DIR, 'CEDA_SPEI.csv'),
+]
+CEDA_SPEI_CSV = next((p for p in _CEDA_CANDIDATES if os.path.exists(p)), None)
+if CEDA_SPEI_CSV is None:
+    raise SystemExit('CEDA_SPEI.csv not found in any of:\n  ' +
+                     '\n  '.join(_CEDA_CANDIDATES))
+# LAYER FILE AND OUTPUT ARE NOW OVERRIDABLE (2026-09-13).
+#
+# These were hard-coded to v1. The layer CSV determines the COLUMN NAMES of the
+# output, because createUtilityLayers.m looks the observed SPEI up by LAYER NAME
+# (sprintf('%s_y%d', layerName, yr), line 382) -- not by crop. So a layer file
+# whose rice layers are named differently needs its own SPEI file, or every
+# lookup misses. A miss is silent: line 384 is a bare `continue`, so the layers
+# simply receive no drought perturbation and the run looks plausible.
+#
+# Overriding rather than editing these constants keeps the v1 path working
+# unchanged while v2 is prepared alongside it.
+#
+#   python apply_observed_drought.py                        # v1, as before
+#   python apply_observed_drought.py --layers Data/utility_layers_v2.csv \
+#                                    --out    Data/observed_spei_harvest_v2.csv
 UTILITY_LAYERS = os.path.join(DATA_DIR, 'utility_layers_v1.csv')
 OUTPUT_CSV     = os.path.join(DATA_DIR, 'observed_spei_harvest.csv')
 
@@ -210,6 +240,21 @@ def print_diagnostics(spei, layers):
 # Driver
 # ---------------------------------------------------------------------------
 def main():
+    global UTILITY_LAYERS, OUTPUT_CSV
+    import argparse
+    ap = argparse.ArgumentParser(description=__doc__.split('\n')[1])
+    ap.add_argument('--layers', default=UTILITY_LAYERS,
+                    help='utility layers CSV (default: %(default)s)')
+    ap.add_argument('--out', default=OUTPUT_CSV,
+                    help='output SPEI-by-harvest CSV (default: %(default)s)')
+    args = ap.parse_args()
+    UTILITY_LAYERS, OUTPUT_CSV = args.layers, args.out
+
+    if not os.path.exists(UTILITY_LAYERS):
+        raise SystemExit(f'Layer file not found: {UTILITY_LAYERS}')
+    print(f'Layer definitions: {UTILITY_LAYERS}')
+    print(f'Output:            {OUTPUT_CSV}')
+
     spei         = load_ceda_spei6()
     layers       = load_utility_layers()
     region_order = load_region_order_from_grma()

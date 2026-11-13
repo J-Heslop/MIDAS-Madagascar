@@ -103,4 +103,81 @@ if isfield(output, 'distressMigrations') && ~isempty(output.distressMigrations)
 else
     fprintf('No distressMigrations field in output.\n');
 end
+
+% ===================== POST-RUN DIAGNOSTIC BLOCK =========================
+% Three questions this trace exists to answer, printed together so a single
+% run settles all of them and the answers are in the console log rather than
+% only inside a CSV.
+
+fprintf('\n=========== DIAGNOSTICS ===========\n');
+
+% (1) DEMOGRAPHY. Initial ages were drawn UNIFORMLY on [0 100] until
+% 2026-08-26 because the population file carried no age columns, giving a 15+
+% share of 0.85 against 0.53 observed for Madagascar in 1985. If the fix is
+% live this should read ~0.53 and stay roughly flat; ~0.78 means the old
+% uniform draw is still in force.
+if isfield(output, 'agentCount_pop') && isfield(output, 'agentCount_all')
+    pop = sum(output.agentCount_pop, 1);
+    wa  = sum(output.agentCount_all, 1);
+    ok  = pop > 0;
+    share = wa(ok) ./ pop(ok);
+    fprintf('\n1. WORKING-AGE SHARE (target ~0.53 at start; 0.85 = uniform-age bug)\n');
+    fprintf('   first year %.4f   mid-run %.4f   last %.4f   min %.4f  max %.4f\n', ...
+            share(1), share(round(end/2)), share(end), min(share), max(share));
+else
+    fprintf('\n1. WORKING-AGE SHARE: agentCount_pop/all not present.\n');
+end
+
+% (2) CREDIT-CONSTRAINT SIGN -- QUESTION CLOSED 2026-09-13.
+%
+% This asked how much of the trapped population was an artefact of the credit
+% test's sign: the test blocked a move unless post-move wealth was at least
+% +creditMultiplier*collateral (a positive cash RESERVE), while its own comment
+% described a borrowing ALLOWANCE, which compares against the negative of the
+% same quantity.
+%
+% Both are gone. The affordability test is now plain liquidity -- a move is
+% blocked only if it would leave the agent in debt -- so the threshold is zero,
+% the two signs coincide, and no agent can be trapped by the sign alone.
+% trappedBySignHistory is emitted as all-zeros by design.
+%
+% This block is kept because it is the only thing that would flag a MIXED
+% analysis: a non-zero value means the output predates the change and its
+% trapped series is not comparable with current runs.
+if isfield(output, 'trappedBySignHistory') && isfield(output, 'trappedHistory')
+    tAll  = sum(output.trappedHistory(:));
+    tSign = sum(output.trappedBySignHistory(:));
+    fprintf('\n2. CREDIT SIGN (retired -- expect 0)\n');
+    if tSign > 0
+        fprintf(2, ['   WARNING: trappedBySignHistory = %d over %d trapped ' ...
+                    'agent-steps (%.3f).\n'], tSign, tAll, tSign / max(tAll,1));
+        fprintf(2, ['   This output PREDATES the 2026-09-13 switch to a plain ' ...
+                    'liquidity\n   constraint. Its trapped series is not ' ...
+                    'comparable with current runs.\n']);
+    elseif tAll > 0
+        fprintf('   trapped agent-steps %d, sign-dependent 0 as expected.\n', tAll);
+    else
+        fprintf('   no trapped agent-steps recorded.\n');
+    end
+else
+    fprintf('\n2. CREDIT SIGN: trappedBySignHistory absent -- is choosePortfolio.m current?\n');
+end
+
+% (3) DROUGHT VARIABILITY. createUtilityLayers prints the Markov window
+% directly; this restates the switch so both appear in one place.
+fprintf('\n3. DROUGHT VARIABILITY: see the "drought Markov variability applied"\n');
+fprintf('   line above -- expect "years 2023-%d" for this horizon.\n', ...
+        modelParametersUsed_endYear());
+
+% Save the whole output so these can be re-checked without re-running.
+save('./Outputs/buffer_trace_output.mat', 'output', 'inputs', '-v7.3');
+fprintf('\nFull output saved to Outputs/buffer_trace_output.mat\n');
+
+end
+
+function y = modelParametersUsed_endYear()
+% The horizon actually used, read the same way readParameters reads it, so the
+% printed expectation matches the run rather than a hard-coded guess.
+    y = str2double(getenv('MIDAS_END_YEAR'));
+    if isnan(y); y = 2025; end
 end

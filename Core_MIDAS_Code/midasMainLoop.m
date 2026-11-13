@@ -30,9 +30,36 @@ migrations = zeros(modelParameters.timeSteps,1);
 outMigrations = zeros(numLocations, modelParameters.timeSteps);
 inMigrations = zeros(numLocations, modelParameters.timeSteps);
 distressMigrations = zeros(numLocations, modelParameters.timeSteps);  % out-migrations triggered by the distress overlay (subset of outMigrations)
+% MIGRATION BY AGENT TYPE (2026-09-04). Out-migrations by agents who held at
+% least one agricultural layer AT THE MOMENT THE DECISION WAS TAKEN. Subsets
+% of outMigrations and distressMigrations respectively, so the non-
+% agricultural counts are the differences and no fourth array is needed.
+%
+% These exist because nothing else in the outputs distinguishes a move by an
+% agricultural household from a move by a wage labourer. The only field that
+% could reconstruct it was agentSummary, which is 99.96% of the output volume
+% and is dropped by slimRunOutputs. Two nLoc x T arrays cost about 72 kB
+% against a 3 MB slim file, so the split is now recorded directly.
+outMigrationsAg = zeros(numLocations, modelParameters.timeSteps);
+distressMigrationsAg = zeros(numLocations, modelParameters.timeSteps);
 migrationMatrix = zeros(numLocations,numLocations,modelParameters.timeSteps);
 portfolioHistory = cell(numLocations, modelParameters.timeSteps);
 trappedHistory = zeros(length(agentList),modelParameters.timeSteps);
+% RETIRED 2026-09-13, NOW ALWAYS ZERO. This counted agents trapped only by the
+% sign of the old credit test -- which demanded a positive cash reserve scaled
+% by sunk investment, rather than permitting borrowing against it. That test was
+% replaced by a plain liquidity constraint (postMoveWealth < 0, see
+% choosePortfolio.m), under which the two signs are the same test and no agent
+% can be trapped by the sign alone. choosePortfolio no longer sets
+% agent.trapped = 2.
+%
+% Still allocated and still saved so run_buffer_trace.m and any saved analysis
+% do not fail on a missing field. A NON-ZERO value here means the output came
+% from a pre-2026-09-13 run.
+%
+% trappedHistory is UNAFFECTED -- it keys on trapped > 0 and still means what
+% it always did.
+trappedBySignHistory = zeros(length(agentList),modelParameters.timeSteps);
 aspirationHistory = zeros(numLayers, modelParameters.timeSteps);
 % Food insecurity tracker (ANNUAL aggregation, not per-timestep).
 % Rows = locations, cols = YEARS (not timesteps). Separate counts for ag
@@ -123,12 +150,28 @@ if bufferOn
     % floor used here.
     modelParameters.bufferFloor = bfFloor;
 
-    % Variant F materiality threshold, in ABSOLUTE food-equivalent units
-    % (fraction of annual subsistence; see readParameters.m). Published for
-    % checkDistressTrigger case 6 -- same pattern as bufferFloor above, and
-    % for the same reason: annualSubsist is only known here.
-    modelParameters.distressShortfallAbs = ...
-        getParamOr(modelParameters, 'distressShortfallFrac', 0.1) * annualSubsist;
+    % Variant F materiality threshold. DIMENSIONLESS as of 2026-09-06 (see the
+    % long note at the lastShortfall assignment): agent.lastShortfall is now a
+    % bounded fraction of the agent's own food requirement, so the threshold it
+    % is compared against is that same fraction and needs no scaling here.
+    %
+    % distressShortfallAbs is deliberately NOT set any more. It was
+    % distressShortfallFrac * annualSubsist, i.e. a cost. Leaving it defined
+    % alongside a fractional lastShortfall would let a stale
+    % checkDistressTrigger compare a fraction against a cost and fire almost
+    % never, silently. Removing the name makes that mismatch a hard error in
+    % the trigger instead -- see the errorIfMissing check there, and the
+    % preflight entry.
+    modelParameters.distressShortfallFracThresh = ...
+        getParamOr(modelParameters, 'distressShortfallFrac', 0.1);
+    if modelParameters.distressShortfallFracThresh < 0 || ...
+       modelParameters.distressShortfallFracThresh > 1
+        error('midasMainLoop:distressFracRange', ...
+              ['distressShortfallFrac = %g is outside [0,1]. It is now a ' ...
+               'fraction of the agent''s food requirement, not a multiple of ' ...
+               'annual subsistence; a value above 1 can never fire.'], ...
+              modelParameters.distressShortfallFracThresh);
+    end
     bfInit  = getParamOr(modelParameters, 'bufferInitYears',  0.5) * annualSubsist;
     bfInit  = min(bfInit, bfCap);                                    % never seed above the ceiling
     bfRef   = getParamOr(modelParameters, 'bufferRefFrac',    0.5) * bfCap;
@@ -212,6 +255,37 @@ if attachTrackOn
 end
 
 % --- Buffer agent-trace (diagnostic; gated, off by default) ---
+% Per-agent trace switch, hoisted once rather than re-tested inside the agent
+% loop. Default false via getParamOr so a parameter set that predates this
+% option still runs -- and runs in the cheap configuration.
+% Bequest of wealth to surviving children at death. Default ON; set
+% modelParameters.inheritanceEnabled = false to reproduce the previous
+% behaviour, in which wealth was destroyed at every death.
+inheritanceOn = getParamOr(modelParameters, 'inheritanceEnabled', true);
+bequestTotal  = 0;   % running total of wealth passed on (diagnostic)
+bequestCount  = 0;   % number of estates distributed (diagnostic)
+
+agentTraceOn = getParamOr(modelParameters, 'agentTraceOn', false);
+
+% How often to write the life trace to disk, in timesteps. 0 = only at the end.
+%
+% WHY THIS EXISTS. agentLifeTrace accumulates rows in memory and flushes once,
+% after the timestep loop, so nothing reaches disk until the run completes. A
+% trace takes hours, and an instrumentation fault -- a carrier reading the
+% wrong agent, an identity that does not close -- is invisible until then. A
+% periodic flush makes the partial trace checkable while the run continues:
+% wealth_decomposition on the partial CSV answers "is the accounting right?"
+% after minutes rather than hours, and the run can be killed if it is not.
+%
+% writeRows rebuilds the whole table each call and overwrites, so repeat calls
+% are safe and simply produce a growing file. The traced cohort is small, so
+% the cost is negligible; and agentLifeTrace returns immediately when the
+% trace is disabled, so production runs pay one comparison per timestep.
+traceFlushEvery = getParamOr(modelParameters, 'traceFlushEvery', 8);
+if agentTraceOn
+    fprintf('%s: agent trace ON -- per-agent histories will be recorded.\n', runName);
+end
+
 bufferTraceOn = bufferOn && isfield(modelParameters, 'traceBuffer') && modelParameters.traceBuffer;
 if bufferTraceOn
     traceRegions   = getParamOr(modelParameters, 'traceRegions', [19 20 21]);
@@ -225,7 +299,27 @@ if bufferTraceOn
     distressTrace  = zeros(0, 13);
 end
 
-nYearsTotal = ceil(modelParameters.timeSteps / modelParameters.cycleLength);
+% NUMBER OF MODEL YEARS (2026-09-11).
+%
+% A model year is defined by the layout of the yield data in
+% createUtilityLayers.m:750 -- year y occupies timesteps
+%   spinupTime + (y-1)*cycleLength + 1 .. spinupTime + y*cycleLength
+% and IS calendar year startYear + y - 1. agYFYearIndex implements the inverse.
+%
+% This previously read ceil(timeSteps / cycleLength), which counts the spinup
+% quarters as model years: with spinupTime = 10 and cycleLength = 4 that is 3
+% extra columns, later discarded by a stripping step at the bottom of this
+% file. Both are removed. The annual arrays now have exactly one column per
+% model year, indexed directly by agYFYearIndex, so they line up with agYF
+% rather than sitting two quarters out of step with it.
+nYearsTotal = floor((modelParameters.timeSteps - modelParameters.spinupTime) / ...
+                    modelParameters.cycleLength);
+if nYearsTotal < 1
+    error('midasMainLoop:noModelYears', ...
+          ['timeSteps (%d) leaves no complete model year after spinupTime ' ...
+           '(%d) at cycleLength %d.'], modelParameters.timeSteps, ...
+          modelParameters.spinupTime, modelParameters.cycleLength);
+end
 foodInsecureCount_ag  = zeros(numLocations, nYearsTotal);
 foodInsecureCount_all = zeros(numLocations, nYearsTotal);
 agentCount_ag         = zeros(numLocations, nYearsTotal);
@@ -238,6 +332,15 @@ agentCount_pop        = zeros(numLocations, nYearsTotal);
 % agent count for a mean-buffer output; mortality-driven loss is the
 % year-on-year drop. Zero everywhere when bufferEnabled is false.
 bufferSum_all         = zeros(numLocations, nYearsTotal);
+% Agricultural agent-QUARTERS by aspiration/ability class, per region per
+% model year. Third dimension is mobilityClass 1-5:
+%   1 voluntarily immobile         | 2 trapped (involuntarily immobile)
+%   3 freely mobile (reached its preferred option)
+%   4 mobile, but not to its preferred option
+%   5 survival migrant (distress overlay)
+% Denominator for any share is the sum over that dimension: decisions taken,
+% not population. See the tally in the decision loop.
+mobilityCount_ag      = zeros(numLocations, nYearsTotal, 5);
 %wealthHistory = zeros(modelParameters.numAgents,modelParameters.timeSteps);
 
 %create a list of shared layers, for use in choosing new link
@@ -255,8 +358,45 @@ agentLocations(aliveList) = [agentList(aliveList).matrixLocation];
 
 warnedNaNWealth = false;   % one-shot flag for the non-finite-wealth safety net
 warnedNaNIncome = false;   % one-shot flag for the non-finite-income guard
+warnedSubsistIdentity = false;  % one-shot flag for the annual subsistence identity
+
+% DIAGNOSTIC ONLY -- per-agent carriers for the wealth decomposition.
+%
+% These MUST be arrays indexed by agent id, not scalars. The decision loop
+% (which calls choosePortfolio and so incurs moving and access costs) and the
+% income loop (which captures wealth_start and writes the life-trace row) are
+% two SEPARATE passes over livingAgents. A scalar set in the first pass holds
+% the last agent's value by the time the second pass reads it, so every traced
+% agent in a quarter records the same number -- which is exactly what the first
+% instrumented trace produced: wealth_preChoice = 20.39 for all ten agents at
+% t = 11, against wealth_start ranging -16 to +11.7.
+%
+% Indexed by currentAgent.id, following aliveList and agentLocations above.
+traceWealthPreChoice = nan(1, length(agentList));
+traceMoveAccessCost  = zeros(1, length(agentList));
+traceIsDistress      = false(1, length(agentList));
+traceIsStandard      = false(1, length(agentList));
+traceMoved           = false(1, length(agentList));
+% Was this agent actually seen by the decision loop THIS timestep? Reset every
+% timestep below. Newborns are appended to agentList inside the decision loop
+% (agentList(currentID) = newBaby), so they never pass through its decision
+% block in their birth timestep but do appear in the income loop that writes
+% the trace. Without this flag their carriers would read 0 from MATLAB's
+% auto-grow and be indistinguishable from a genuine zero spend. Emitting NaN
+% instead makes any such row fail the identity check loudly rather than
+% contributing a wrong number to a total.
+traceDecisionSeen    = false(1, length(agentList));
+% What checkDistressTrigger actually compared, per agent, this timestep.
+traceTrigShortfall   = nan(1, length(agentList));
+traceTrigCooldownOK  = false(1, length(agentList));
+traceTrigFired       = false(1, length(agentList));
 
 for indexT = 1:modelParameters.timeSteps
+
+    % Clear the decision-loop witness for the new timestep. Must be per
+    % timestep, not once: a flag left true from an earlier timestep would make
+    % a stale carrier look freshly written.
+    traceDecisionSeen(:) = false;
 
     % Compute current calendar year and demographic array index.
     % During spinup (indexT <= spinupTime) the model uses startYear demographics.
@@ -415,14 +555,54 @@ for indexT = 1:modelParameters.timeSteps
             currentAgent.TOD = indexT;
             aliveList(currentAgent.id) = false;
 
+            % --- INHERITANCE (2026-08-27) ---------------------------------
+            % Wealth passes in equal shares to the agent's surviving children.
+            %
+            % Without this, wealth is destroyed at every death while every
+            % newborn starts from zero and then borrows 10-20 to buy into a
+            % livelihood. The founding endowment (agentParameters.initial-
+            % WealthMean) only delays that: as the 1985 cohort dies out, the
+            % population reverts to starting at zero, which is why the wealth
+            % series trends down over the projection horizon even though the
+            % initialisation artefact has been removed.
+            %
+            % ONLY POSITIVE ESTATES ARE DISTRIBUTED. An agent that dies in
+            % debt passes nothing; the deficit is extinguished. Inheriting
+            % debt would compound it across generations, and it is not how
+            % insolvent estates work. Note this is therefore mildly
+            % expansionary: negative wealth leaves the system at death while
+            % positive wealth is retained.
+            %
+            % Heirs may be below working age. That is intended -- the wealth
+            % sits with them until they begin making decisions at
+            % ageDecision, which is the point at which they would otherwise
+            % have gone into debt to enter a livelihood.
+            if inheritanceOn && currentAgent.wealth > 0 && ~isempty(currentAgent.children)
+                heirIDs = currentAgent.children;
+                heirIDs = heirIDs(heirIDs <= numel(aliveList));
+                heirIDs = heirIDs(aliveList(heirIDs));
+                if ~isempty(heirIDs)
+                    sharePer = currentAgent.wealth / numel(heirIDs);
+                    for iH = 1:numel(heirIDs)
+                        agentList(heirIDs(iH)).wealth = ...
+                            agentList(heirIDs(iH)).wealth + sharePer;
+                    end
+                    bequestTotal = bequestTotal + currentAgent.wealth;
+                    bequestCount = bequestCount + 1;
+                    currentAgent.wealth = 0;
+                end
+            end
+
             % Final row for a traced agent, so the life history ends with an
             % explicit cause rather than simply stopping. Without this, death
             % is indistinguishable from the trace running out at the horizon.
             if agentLifeTrace('enabled') && agentLifeTrace('isTraced', currentAgent.id)
                 rD = struct();
                 rD.t          = indexT;
-                rD.year       = modelParameters.startYear + floor((indexT - 1) / modelParameters.cycleLength);
-                rD.quarter    = mod(indexT - 1, modelParameters.cycleLength) + 1;
+                rD.year       = modelParameters.startYear + ...
+                                    agYFYearIndex(indexT, modelParameters, nYearsTotal) - 1;
+                rD.quarter    = mod(indexT - modelParameters.spinupTime - 1, ...
+                                             modelParameters.cycleLength) + 1;
                 rD.agentID    = currentAgent.id;
                 rD.age        = currentAgent.age;      % years -- see note at the life row
                 rD.tenure_q   = indexT - currentAgent.DOB;
@@ -464,6 +644,13 @@ for indexT = 1:modelParameters.timeSteps
                 %newBaby = initializeAgent(agentParameters, utilityVariables, age, gender, currentAgent.location, agentList(agentParameters.currentID));
                 newBaby = initializeAgent(agentParameters, utilityVariables, modelParameters, age, gender, currentAgent.location);
                 newBaby.id = agentParameters.currentID;
+                % Descent, recorded on both sides (2026-08-27). The network
+                % link established below is rewired over the run and is not a
+                % reliable record of parentage; these two fields are. Holding
+                % the child list on the parent makes inheritance at death a
+                % lookup instead of a scan over every agent.
+                newBaby.parentID = currentAgent.id;
+                currentAgent.children(end+1) = newBaby.id;
                 agentList(agentParameters.currentID) = newBaby;
                 agentParameters.currentID = agentParameters.currentID + 1;
                 newBaby.matrixLocation = currentAgent.matrixLocation;
@@ -650,16 +837,52 @@ for indexT = 1:modelParameters.timeSteps
                         % matrixLocation is overwritten by a move before the
                         % trace row is appended, so capture it here
         traceThisAgent = bufferTraceOn && ismember(currentAgent.id, traceIDs);
-        if traceThisAgent
-            [distressFire, distressDiag] = ...
-                checkDistressTrigger(currentAgent, modelParameters, indexT, oracleYF);
-            isDistress = postSpin && ageOK && distressFire;
-        else
-            isDistress = postSpin && ageOK && ...
-                         checkDistressTrigger(currentAgent, modelParameters, indexT, oracleYF);
-        end
+        % ALWAYS request the diagnostics. checkDistressTrigger builds the diag
+        % struct unconditionally (see its header), so the second output is
+        % free, and it carries the values the trigger ACTUALLY COMPARED --
+        % which is the only way to tell a trigger that fired correctly from one
+        % that fired on a value different from the one the life trace records
+        % later in the timestep. Previously this was captured only when the
+        % buffer trace was enabled, so the ordinary diagnostic run could not
+        % answer the question at all.
+        [distressFire, distressDiag] = ...
+            checkDistressTrigger(currentAgent, modelParameters, indexT, oracleYF);
+        isDistress = postSpin && ageOK && distressFire;
+
+        % What the trigger saw, carried by agent id for the life trace in the
+        % income loop. Same reason as the wealth carriers: that is a separate
+        % pass over livingAgents, so a loop scalar would belong to whichever
+        % agent happened to be last through this one.
+        traceTrigShortfall(currentAgent.id) = distressDiag.lastShortfall;
+        traceTrigCooldownOK(currentAgent.id) = distressDiag.cooldownOK;
+        traceTrigFired(currentAgent.id)      = distressFire;
 
         isStandard = postSpin && ageOK && rand() < currentAgent.pChoose;
+
+        % DIAGNOSTIC ONLY -- written per agent, OUTSIDE the decision block, into
+        % the id-indexed carriers declared before the timestep loop. Set here
+        % rather than inside the block because choosePortfolio is only reached
+        % when a decision is actually taken: a quarter without a decision must
+        % record zero spend, not whatever was last seen.
+        % An agent that does not evaluate this quarter has made no mobility
+        % decision, so it must not carry last quarter's classification.
+        % choosePortfolio is the only writer of mobilityClass and only runs
+        % when isDistress || isStandard; Agent is a handle class, so without
+        % this reset the previous value persists and is written to the trace
+        % as though it were this quarter's choice. That produced class-5
+        % "distress migrants" in quarters with zero moves.
+        %
+        % 0 = no decision taken this quarter. Classification statistics should
+        % be computed over rows with mobilityClass > 0 only.
+        currentAgent.mobilityClass = 0;
+
+        wealthBeforeChoice = currentAgent.wealth;
+        traceWealthPreChoice(currentAgent.id) = wealthBeforeChoice;
+        traceMoveAccessCost(currentAgent.id)  = 0;
+        traceIsDistress(currentAgent.id)      = isDistress;
+        traceIsStandard(currentAgent.id)      = isStandard;
+        traceMoved(currentAgent.id)           = false;
+        traceDecisionSeen(currentAgent.id)    = true;
 
         if isDistress || isStandard
             % Capture pre-decision state so the live slot count can be
@@ -672,7 +895,75 @@ for indexT = 1:modelParameters.timeSteps
             slotPrevLoc  = currentAgent.matrixLocation;
             slotPrevPort = logical(currentAgent.currentPortfolio(1, 1:nSlotLayers));
 
+            % PRE-DECISION AGRICULTURAL STATUS, for the by-agent-type
+            % migration counters below. Captured HERE, before
+            % choosePortfolio, because a move rewrites currentPortfolio to
+            % the destination portfolio. The question the drought-response
+            % analysis asks is what the agent was when the drought hit, not
+            % what it became by moving -- an agricultural household that
+            % leaves farming in order to migrate would otherwise be counted
+            % as a non-agricultural mover, which inverts the signal.
+            %
+            % Same test as isAgAgent later in the timestep, so the split is
+            % consistent with agentCount_ag and the food-insecurity metrics.
+            wasAgAgent = any(currentAgent.currentPortfolio(agLayerIdx));
+
+            % DIAGNOSTIC ONLY -- does not affect behaviour.
+            % choosePortfolio debits moving costs (choosePortfolio.m:767) and
+            % layer access costs (:800). Both happen HERE, ~270 lines before
+            % wealthBeforeQ is captured for the life-trace reconciliation, so
+            % wealth_resid cannot see either: it is computed over a window that
+            % opens after they have already been taken, and is therefore
+            % identically zero in every trace written to date. That reads as
+            % "the books balance" when it actually means "these two channels
+            % were never on the books".
+            %
+            % Nothing writes to currentAgent.wealth between wealthBeforeChoice
+            % (set above, outside this block) and wealthBeforeQ except
+            % choosePortfolio itself, so the difference across this call is
+            % exactly the moving-plus-access debit.
             [currentAgent, moved] = choosePortfolio(currentAgent, utilityVariables, indexT, modelParameters, mapParameters, demographicVariables, mapVariables, isDistress);
+
+            % Positive = wealth spent on moving and/or layer access this
+            % quarter. Split is not recoverable here without changing
+            % choosePortfolio's signature; the total is what the wealth
+            % decomposition needs, and a move is identifiable from `moved`.
+            traceMoveAccessCost(currentAgent.id) = ...
+                wealthBeforeChoice - currentAgent.wealth;
+            traceMoved(currentAgent.id) = ~isempty(moved) && numel(moved) > 1;
+
+            % ---- MOBILITY CLASS TALLY, agricultural agents, by region -------
+            % Counts agent-QUARTERS by aspiration/ability class, so the paper
+            % can show trapped vs voluntarily immobile vs mover as timeseries
+            % per region. Nothing else in the outputs carries this:
+            % trappedHistory is per agent with no location and no agricultural
+            % split, and agentSummary.mobilityClass is only the end state.
+            %
+            % DENOMINATOR IS DECISIONS TAKEN, not population. Only agents that
+            % actually evaluated this quarter reach here, so a share computed
+            % from these counts reads "of the agricultural agents who weighed
+            % their options, X% wanted to move and could not". A population
+            % share would be diluted by pChoose, making the level an artefact
+            % of a calibration parameter rather than a statement about
+            % constraint.
+            %
+            % LOCATION AND STATUS ARE PRE-DECISION. slotPrevLoc and wasAgAgent
+            % are both captured before choosePortfolio, for the same reason the
+            % migration counters use them: a move rewrites location and
+            % portfolio, so counting after would attribute a Grand Sud
+            % household's constraint to wherever it fled to.
+            if wasAgAgent
+                clsNow = currentAgent.mobilityClass;
+                if clsNow >= 1 && clsNow <= 5
+                    yIdxNow = agYFYearIndex(indexT, modelParameters, nYearsTotal);
+                    % Spinup year-ends give yIdxNow <= 0; excluded from the
+                    % reported bins exactly as the food-insecurity counters are.
+                    if yIdxNow >= 1
+                        mobilityCount_ag(slotPrevLoc, yIdxNow, clsNow) = ...
+                            mobilityCount_ag(slotPrevLoc, yIdxNow, clsNow) + 1;
+                    end
+                end
+            end
 
             if enforceSlotsLive
                 slotNewLoc  = currentAgent.matrixLocation;
@@ -688,14 +979,24 @@ for indexT = 1:modelParameters.timeSteps
                 end
             end
 
-            currentAgent.agentPortfolioHistory{indexT} = currentAgent.currentPortfolio;
-            currentAgent.agentAspirationHistory{indexT} = currentAgent.currentAspiration;
-            currentAgent.consideredHistory{indexT} = currentAgent.consideredPortfolios;
+            % Per-agent trace, off by default. These three were 99.96% of every
+            % projection output file and dominate run-time memory; nothing in
+            % the model reads them. See modelParameters.agentTraceOn in
+            % readParameters.m. wealthHistory is NOT gated -- checkDistressTrigger
+            % reads it.
+            if agentTraceOn
+                currentAgent.agentPortfolioHistory{indexT} = currentAgent.currentPortfolio;
+                currentAgent.agentAspirationHistory{indexT} = currentAgent.currentAspiration;
+                currentAgent.consideredHistory{indexT} = currentAgent.consideredPortfolios;
+            end
             if(~isempty(moved))
                 movedToLoc = moved(2);   % (distress trace) destination
                 migrations(indexT) = migrations(indexT) + 1;
                 inMigrations(moved(2), indexT) = inMigrations(moved(2), indexT) + 1;
                 outMigrations(moved(1), indexT) = outMigrations(moved(1), indexT) + 1;
+                if wasAgAgent
+                    outMigrationsAg(moved(1), indexT) = outMigrationsAg(moved(1), indexT) + 1;
+                end
                 migrationMatrix(moved(1),moved(2),indexT) = migrationMatrix(moved(1),moved(2),indexT) + 1;
                 currentAgent.moveHistory = [currentAgent.moveHistory; indexT currentAgent.matrixLocation currentAgent.visX currentAgent.visY];
 
@@ -709,6 +1010,10 @@ for indexT = 1:modelParameters.timeSteps
                     % B counters defensively, in case the agent was
                     % carrying both signals.)
                     distressMigrations(moved(1), indexT) = distressMigrations(moved(1), indexT) + 1;
+                    if wasAgAgent
+                        distressMigrationsAg(moved(1), indexT) = ...
+                            distressMigrationsAg(moved(1), indexT) + 1;
+                    end
                     currentAgent.consecutiveFIYears = 0;
                     currentAgent.quartersBelowWealthThreshold = 0;
                     currentAgent.lastShortfall = 0;   % Variant F: don't re-fire on the pre-move shortfall
@@ -1105,8 +1410,10 @@ for indexT = 1:modelParameters.timeSteps
                 if agentLifeTrace('isTraced', currentAgent.id)
                     r = struct();
                     r.t          = indexT;
-                    r.year       = modelParameters.startYear + floor((indexT - 1) / modelParameters.cycleLength);
-                    r.quarter    = mod(indexT - 1, modelParameters.cycleLength) + 1;
+                    r.year       = modelParameters.startYear + ...
+                                    agYFYearIndex(indexT, modelParameters, nYearsTotal) - 1;
+                    r.quarter    = mod(indexT - modelParameters.spinupTime - 1, ...
+                                             modelParameters.cycleLength) + 1;
                     r.agentID    = currentAgent.id;
                     % TRACE FIX (2026-08-09). This was indexT - DOB, which is
                     % NOT age: buildWorld.m:103 sets DOB = 0 for every agent
@@ -1154,6 +1461,54 @@ for indexT = 1:modelParameters.timeSteps
                     r.wealth_expect  = wealthBeforeQ + netIncome - subsistNow;
                     r.wealth_resid   = currentAgent.wealth - r.wealth_expect;
 
+                    % Moving + layer access spend, taken before wealth_start
+                    % was captured (see the note at the choosePortfolio call).
+                    % wealth_preChoice - wealth_start reconstructs the full
+                    % quarter, so the complete identity a decomposition needs is
+                    %   wealth_end = wealth_preChoice - moveAccessCost
+                    %                + netIncome - subsistNow + wealth_resid
+                    % Read from the id-indexed carriers, NOT from the loop
+                    % scalars: this is a different pass over livingAgents from
+                    % the one that set them, so the scalars belong to whichever
+                    % agent happened to be last in the decision loop.
+                    % isDistress and isStandard belong INSIDE this guard with
+                    % the others. They are carriers from the same loop, so for
+                    % an agent that never reached the decision loop they hold
+                    % whatever was last written for that id -- reporting a
+                    % channel for a decision that was not taken. Keeping them
+                    % outside produced rows with a real isDistress alongside a
+                    % NaN wealth_preChoice, which is incoherent.
+                    %
+                    % Distress moves SKIP the reserve test in choosePortfolio,
+                    % so they are the only route by which an indebted agent can
+                    % pay to move; the flag is what separates that channel from
+                    % the voluntary one in the wealth decomposition.
+                    if traceDecisionSeen(currentAgent.id)
+                        r.wealth_preChoice = traceWealthPreChoice(currentAgent.id);
+                        r.moveAccessCost   = traceMoveAccessCost(currentAgent.id);
+                        r.moved            = double(traceMoved(currentAgent.id));
+                        r.isDistress       = double(traceIsDistress(currentAgent.id));
+                        r.isStandard       = double(traceIsStandard(currentAgent.id));
+                        % The trigger's own view, captured in the decision
+                        % loop. trigShortfall is the value arm 6 compared
+                        % against distressShortfallFracThresh; lastShortfall
+                        % below is the value at trace-writing time. They differ
+                        % if anything rewrites it mid-timestep, which is
+                        % exactly what needs ruling in or out.
+                        r.trigShortfall    = traceTrigShortfall(currentAgent.id);
+                        r.trigCooldownOK   = double(traceTrigCooldownOK(currentAgent.id));
+                        r.trigFired        = double(traceTrigFired(currentAgent.id));
+                    else
+                        % Agent did not pass the decision loop this timestep
+                        % (newborn). NaN rather than 0 so the row is excluded
+                        % and counted, not silently added in as a real zero.
+                        r.wealth_preChoice = NaN;
+                        r.moveAccessCost   = NaN;
+                        r.moved            = NaN;
+                        r.isDistress       = NaN;
+                        r.isStandard       = NaN;
+                    end
+
                     % Income reconciliation. newIncome legitimately contains
                     % three components, so all three must appear here or the
                     % residual measures the omission rather than an error:
@@ -1176,6 +1531,10 @@ for indexT = 1:modelParameters.timeSteps
                     r.buffer      = currentAgent.buffer;
                     r.lastShortfall = currentAgent.lastShortfall;
                     r.trapped     = double(currentAgent.trapped);
+                    % Aspiration/ability category (see Agent.m): 1 voluntarily
+                    % immobile, 2 trapped, 3 voluntary migrant, 4 constrained
+                    % migrant, 5 distress migrant.
+                    r.mobilityClass = double(currentAgent.mobilityClass);
 
                     agentLifeTrace('life', r);
                 end
@@ -1240,9 +1599,32 @@ for indexT = 1:modelParameters.timeSteps
             % step. So a wealth decline over the year IS the annual
             % equivalent of the original "netIncome < subsistence_costs"
             % check -- without the harvest-cycle artefact.
-            if mod(indexT, modelParameters.cycleLength) == 0
+            % YEAR-END ON THE MODEL'S OWN GRID (2026-09-11).
+            %
+            % Was mod(indexT, cycleLength) == 0, i.e. a grid anchored at t = 1.
+            % The yield data is anchored at spinupTime + 1 instead
+            % (createUtilityLayers.m:750), and with spinupTime = 10 not a
+            % multiple of cycleLength = 4 the two sat two quarters apart. Every
+            % accounting year then spanned two drought years while fullCost
+            % below charged all four quarters at the LATER year's food-price
+            % inflation -- so the sum of the four quarterly subsistNow debits
+            % (line ~1159, inflated per drought year) did not equal fullCost,
+            % breaking the identity this block relies on and biasing need,
+            % buffer drawdown, lastShortfall and the distress trigger with it.
+            %
+            % Spinup year-ends STILL FIRE, on the same phase (t = 2, 6, 10 for
+            % spinupTime = 10). That is deliberate: the one-time buffer
+            % endowment is granted at a year-end, and delaying it to the first
+            % post-spinup year would extend the buffer ramp documented below,
+            % which is already known to drive foodInsecureRate across the
+            % historical period. yearIdx is left UNCLAMPED so those spinup
+            % years come out <= 0 and can be excluded from the output bins
+            % without being excluded from the dynamics.
+            if mod(indexT - modelParameters.spinupTime, modelParameters.cycleLength) == 0
                 prevYearEndIdx = indexT - modelParameters.cycleLength;
-                yearIdx        = indexT / modelParameters.cycleLength;
+                yearIdx        = floor((indexT - modelParameters.spinupTime - 1) / ...
+                                       modelParameters.cycleLength) + 1;
+                inModelYear    = (yearIdx >= 1) && (yearIdx <= nYearsTotal);
                 loc            = currentAgent.matrixLocation;
                 isAgAgent      = any(currentPortfolio(agLayerIdx));
 
@@ -1257,13 +1639,30 @@ for indexT = 1:modelParameters.timeSteps
                 % hold a small non-livestock store, granted at bfNonAgScale of
                 % the farm endowment, so they absorb a first bad year too. They
                 % receive it once, on the same one-time basis.
-                if bufferOn && ~currentAgent.farmBufferGranted
-                    if isAgAgent
+                % ONE FLAG PER STORE (fixed 2026-08-27). Both branches
+                % previously set farmBufferGranted, so whichever fired first
+                % consumed the entitlement to the other. An agent not farming
+                % at its first year-end took the small non-ag store, marked
+                % itself granted, and never received the farm endowment on
+                % taking up farming. Traced southern farmers therefore entered
+                % the trace holding the non-ag FLOOR -- 0.42 where the farm
+                % endowment is 3.50 -- and the buffer needed ~15 years to reach
+                % its operating level. That ramp is what drove foodInsecureRate
+                % from ~0.90 down to ~0.50 across the historical period, and
+                % distress migration with it, since both are defined on income
+                % PLUS BUFFER against subsistence.
+                %
+                % The two stores are now tracked separately, matching the
+                % documented intent in Agent.m: the farm endowment is granted
+                % the first time an agent occupies an agricultural layer,
+                % whenever in its life that happens.
+                if bufferOn
+                    if isAgAgent && ~currentAgent.farmBufferGranted
                         currentAgent.buffer = max(currentAgent.buffer, bfInit);
                         currentAgent.farmBufferGranted = true;
-                    else
+                    elseif ~isAgAgent && ~currentAgent.nonAgBufferGranted
                         currentAgent.buffer = max(currentAgent.buffer, bfInit * bfNonAgScale);
-                        currentAgent.farmBufferGranted = true;
+                        currentAgent.nonAgBufferGranted = true;
                     end
                 end
 
@@ -1374,6 +1773,40 @@ for indexT = 1:modelParameters.timeSteps
                             subsistThisAgent = 0;
                         end
                         fullCost  = subsistThisAgent * inflator;
+
+                        % IDENTITY CHECK (2026-09-11), once per run.
+                        %
+                        % fullCost must equal the sum of the four quarterly
+                        % subsistNow debits for this agent's year, because the
+                        % comment at the head of this block relies on exactly
+                        % that: "wealth_end < wealth_start <=> annual netIncome
+                        % < annual subsistence consumption". Both sides inflate
+                        % by (1 + bfPhiFood*(1 - agYF)), so they agree only if
+                        % every quarter of the accounting year sits in the SAME
+                        % drought year.
+                        %
+                        % That is what failed: the accounting year ran on a grid
+                        % anchored at t = 1 while agYF runs from spinupTime + 1,
+                        % so with spinupTime = 10 and cycleLength = 4 each
+                        % accounting year straddled two drought years and was
+                        % charged entirely at the later one's inflation. This
+                        % assertion is the cheapest thing that would have caught
+                        % it, so it stays.
+                        if ~warnedSubsistIdentity && subsistThisAgent > 0 && bufferOn && bfPhiFood > 0
+                            qs = (indexT - modelParameters.cycleLength + 1):indexT;
+                            qs = qs(qs >= 1);
+                            iyQ = arrayfun(@(tt) agYFYearIndex(tt, modelParameters, nSimYearsBuf), qs);
+                            if numel(unique(iyQ)) > 1
+                                warnedSubsistIdentity = true;
+                                warning('midasMainLoop:subsistenceIdentity', ...
+                                    ['Accounting year ending t=%d spans drought years %s. ' ...
+                                     'fullCost is charged at one of them, so it cannot equal ' ...
+                                     'the sum of the quarterly subsistNow debits. Check that ' ...
+                                     'the year grid is anchored at spinupTime (see ' ...
+                                     'YEAR_CONVENTION_AUDIT.md). Reported once per run.'], ...
+                                    indexT, mat2str(unique(iyQ)));
+                            end
+                        end
                         need      = max(0, fullCost - annualIncome);
                         agSurplus = annualIncome - fullCost;
 
@@ -1451,7 +1884,53 @@ for indexT = 1:modelParameters.timeSteps
                         % only when the food gap exceeded what the buffer
                         % above its floor could cover. Refreshed every
                         % year-end; reset defensively on a distress move.
-                        currentAgent.lastShortfall = shortfall;
+                        %
+                        % BOUNDED FRACTION OF NEED (2026-09-06). Was stored in
+                        % cost units and compared against a threshold built
+                        % from NOMINAL annual subsistence, while `shortfall`
+                        % itself is measured against the INFLATED requirement
+                        % (fullCost = annualSubsist * inflator, inflator up to
+                        % 1 + phiFood at agYF -> 0). Two consequences, both
+                        % wrong:
+                        %
+                        %   1. The two sides of the trigger test sat on
+                        %      different bases, so in a drought year the left
+                        %      side inflated by up to 77% while the right side
+                        %      did not. The trigger got easier to clear for
+                        %      reasons unconnected to the agent's harvest.
+                        %   2. The quantity exceeded 1.0 in 14% of food-
+                        %      insecure agent-years (max 1.54). "Short of 154%
+                        %      of a year's food" is not a meaningful measure of
+                        %      hunger -- an agent cannot obtain less than none.
+                        %
+                        % Storing the deficit as a FRACTION OF WHAT WAS NEEDED
+                        % fixes both. It is bounded [0,1] by construction, and
+                        % both sides of the test are now dimensionless.
+                        %
+                        % The inflator stays in the DENOMINATOR rather than
+                        % being removed: if food doubles in price, income buys
+                        % half as much of it, so the fraction of need met falls.
+                        % That is entitlement failure stated correctly, and it
+                        % preserves the only drought channel that reaches
+                        % non-farming agents. What it no longer does is treat
+                        % dear food as hunger beyond total.
+                        %
+                        % FI incidence is UNCHANGED: shortfall > 0 and
+                        % shortfall/fullCost > 0 select the same agent-years,
+                        % so the food-insecure set, and the subsistence_costs
+                        % calibration resting on it, are untouched. Only which
+                        % of the food-insecure clear the trigger changes.
+                        %
+                        % Dependants have subsistThisAgent = 0 and hence
+                        % fullCost = 0; their shortfall is already 0, so guard
+                        % the division rather than producing 0/0 = NaN, which
+                        % would propagate into every comparison as false.
+                        if fullCost > 0
+                            currentAgent.lastShortfall = ...
+                                min(1, max(0, shortfall / fullCost));
+                        else
+                            currentAgent.lastShortfall = 0;
+                        end
 
                         % FI is now unmet consumption AFTER drawing the buffer.
                         wasInsecure = shortfall > 0;
@@ -1521,6 +2000,13 @@ for indexT = 1:modelParameters.timeSteps
                     % under-15 share and bias every level-based migration
                     % error metric, silently. Migration counts are all-ages
                     % events, so they need an all-ages denominator.
+                    % inModelYear excludes the spinup year-ends, whose yearIdx
+                    % is <= 0. The dynamics above still run for them (buffer
+                    % endowment, shortfall, trigger state); only the reported
+                    % annual bins are withheld, so year 1 of every output array
+                    % is the first real model year rather than a mixture of
+                    % spinup and post-spinup quarters.
+                    if inModelYear
                     agentCount_pop(loc, yearIdx) = agentCount_pop(loc, yearIdx) + 1;
 
                     countsAgeOK = currentAgent.age >= modelParameters.ageDecision;
@@ -1536,6 +2022,7 @@ for indexT = 1:modelParameters.timeSteps
                                 foodInsecureCount_ag(loc, yearIdx) = foodInsecureCount_ag(loc, yearIdx) + 1;
                             end
                         end
+                    end
                     end
 
                     % Update consecutive-FI counter used by the distress-
@@ -1569,6 +2056,7 @@ for indexT = 1:modelParameters.timeSteps
 
     %update our time path of trapped agents
     trappedHistory([agentList(:).trapped] > 0,indexT) = 1;
+    trappedBySignHistory([agentList(:).trapped] == 2,indexT) = 1;
     %Count number of agents with aspiration for each layer in time T
    
     if (modelParameters.visualizeYN & mod(indexT, modelParameters.visualizeInterval) == 0)
@@ -1609,7 +2097,11 @@ for indexT = 1:modelParameters.timeSteps
             fprintf([runName ' - ' modelParameters.sspScenario ': initialisation step ' num2str(indexT) ' of ' num2str(modelParameters.spinupTime) '.\n']);
         else 
             sim_timestep = indexT-modelParameters.spinupTime ;
-            year = num2str(modelParameters.startYear + floor(sim_timestep /modelParameters.cycleLength));
+            % Canonical mapping (see agYFYearIndex). The previous form,
+            % floor(sim_timestep/cycleLength), gave model year 1 only three
+            % quarters and ran one year behind the yield data.
+            year = num2str(modelParameters.startYear + ...
+                           agYFYearIndex(indexT, modelParameters, nYearsTotal) - 1);
             quarter = num2str(mod(sim_timestep-1,modelParameters.cycleLength)+1);
             fprintf([runName ' - ' modelParameters.sspScenario ': ' year '-Q' quarter ' of ' num2str(modelParameters.endYear) ' - ' num2str(migrations(indexT)) ' migrations across ' num2str(numLivingAgents) ' total agents.\n']);
         end 
@@ -1617,7 +2109,19 @@ for indexT = 1:modelParameters.timeSteps
     
     %%update portfolioHistory
     for indexJ = 1:numLocations
-       portfolioHistory{indexJ, indexT} = {(agentList([agentList.matrixLocation] == indexJ).currentPortfolio)};
+       % Every agent's portfolio, per location, per timestep -- the same
+       % order of magnitude as the agentSummary histories and read by nothing.
+       % Gated with them so an untraced run's field set matches a slimmed
+       % file's exactly, which keeps verify_slim.jl comparing like with like.
+       if agentTraceOn
+           portfolioHistory{indexJ, indexT} = {(agentList([agentList.matrixLocation] == indexJ).currentPortfolio)};
+       end
+    end
+
+    % Checkpoint the life trace so a long run can be validated while it runs
+    % rather than only after it finishes. No-op when tracing is off.
+    if traceFlushEvery > 0 && mod(indexT, traceFlushEvery) == 0
+        agentLifeTrace('flush');
     end
 end %for indexT = 1:modelParameters.timeSteps
 
@@ -1631,32 +2135,81 @@ outputs.locations = mapVariables.locations;
 outputs.inMigrations = inMigrations;
 outputs.outMigrations = outMigrations;
 outputs.distressMigrations = distressMigrations;
+% Agricultural subsets of the two above, split on the agent's portfolio at
+% the moment of decision. Non-agricultural counts are the differences:
+%   nonAg total     = outMigrations      - outMigrationsAg
+%   nonAg distress  = distressMigrations - distressMigrationsAg
+%   voluntary       = outMigrations      - distressMigrations   (likewise per type)
+outputs.outMigrationsAg = outMigrationsAg;
+outputs.distressMigrationsAg = distressMigrationsAg;
+% DROUGHT STATE SEQUENCE (nLoc x nSimYears, 1 = drought). Deterministic and
+% recoverable from observed_spei_harvest.csv for 1985-2022, but from 2023 it
+% is a per-run draw from the Markov chain and was previously discarded, so
+% no projection-period analysis could tell a drought year from a normal one.
+% About 18 kB per run.
+if isfield(utilityVariables, 'droughtStates')
+    outputs.droughtStates = utilityVariables.droughtStates;
+end
 outputs.migrationMatrix = migrationMatrix;
 outputs.averageExpectedOpening = averageExpectedOpening;
 outputs.utilityHistory = utilityVariables.utilityHistory;
-outputs.portfolioHistory = portfolioHistory;
-outputs.trappedHistory = trappedHistory;
-% Food insecurity: fraction of agent-YEARS where wealth declined (annual
-% income failed to cover annual subsistence), post-spinup, per location.
-% Year-indexed arrays (nLocations x nYearsTotal). Strip the spinup
-% portion: any year that ends entirely within or partially overlapping
-% the spinup period is dropped, leaving only fully post-spinup years.
-spinupYears = ceil(modelParameters.spinupTime / modelParameters.cycleLength);
-firstPostSpinupYear = spinupYears + 1;
-if firstPostSpinupYear > size(foodInsecureCount_ag, 2)
-    firstPostSpinupYear = size(foodInsecureCount_ag, 2);   % degenerate guard
+% Only populated when tracing; an empty cell array otherwise. Attached
+% conditionally so the saved struct has the same fields as a slimmed file.
+if agentTraceOn
+    outputs.portfolioHistory = portfolioHistory;
 end
-outputs.foodInsecureCount_ag   = foodInsecureCount_ag(:,  firstPostSpinupYear:end);
-outputs.foodInsecureCount_all  = foodInsecureCount_all(:, firstPostSpinupYear:end);
-outputs.agentCount_ag          = agentCount_ag(:,         firstPostSpinupYear:end);
-outputs.agentCount_all         = agentCount_all(:,        firstPostSpinupYear:end);
-outputs.agentCount_pop         = agentCount_pop(:,        firstPostSpinupYear:end);
-% Mean livestock/grain buffer per location-year (post-spinup). Zero
-% everywhere when bufferEnabled is false. The year-on-year drop in a
-% drought year is the mortality signal; the level is the absorption state.
-outputs.bufferMean             = bufferSum_all(:, firstPostSpinupYear:end) ./ ...
-                                 max(1, agentCount_all(:, firstPostSpinupYear:end));
-outputs.aspirationHistory = aspirationHistory;
+outputs.trappedHistory = trappedHistory;
+outputs.trappedBySignHistory = trappedBySignHistory;
+% Inheritance diagnostics: total wealth bequeathed and how many estates were
+% distributed. If bequestCount is zero in a run with deaths, descent is not
+% being recorded (check parentID/children in the birth block).
+outputs.bequestTotal = bequestTotal;
+outputs.bequestCount = bequestCount;
+% Food insecurity: fraction of agent-YEARS where wealth declined (annual
+% income failed to cover annual subsistence), per location.
+%
+% NO SPINUP STRIPPING (2026-09-11). These arrays now have exactly one column
+% per model year, written only when inModelYear, so column y IS model year y
+% IS calendar year startYear + y - 1, on the same grid as agYF. There is
+% nothing to strip.
+%
+% The previous code sized the arrays with ceil(timeSteps/cycleLength) -- which
+% counted spinup quarters as years -- and then discarded the first
+% ceil(spinupTime/cycleLength) columns. With spinupTime = 10 that dropped 3
+% columns covering t = 1-12, i.e. it also discarded timesteps 11 and 12, which
+% are post-spinup, and left column 1 starting at t = 13: two quarters out of
+% step with agYF year 1 (t = 11-14). Every annual bin therefore held half of
+% one drought year and half of the next, smearing each drought across two
+% adjacent bins and halving its apparent magnitude.
+%
+% CONSUMERS MUST BE UPDATED IN STEP. plot_distress_threshold.m was written
+% against the old layout and computes its own spinupYears/nValid offsets; see
+% YEAR_CONVENTION_AUDIT.md section D.
+outputs.foodInsecureCount_ag   = foodInsecureCount_ag;
+outputs.foodInsecureCount_all  = foodInsecureCount_all;
+outputs.agentCount_ag          = agentCount_ag;
+outputs.agentCount_all         = agentCount_all;
+outputs.agentCount_pop         = agentCount_pop;
+% Aspiration/ability tally, agricultural agents, nLoc x nYears x 5.
+% outputs.mobilityClassNames documents the third dimension so a consumer
+% never has to guess the order.
+outputs.mobilityCount_ag       = mobilityCount_ag;
+outputs.mobilityClassNames     = {'voluntarily immobile', ...
+                                  'trapped (involuntarily immobile)', ...
+                                  'freely mobile', ...
+                                  'mobile, not to preferred option', ...
+                                  'survival migrant'};
+% Mean livestock/grain buffer per location-year. Zero everywhere when
+% bufferEnabled is false. The year-on-year drop in a drought year is the
+% mortality signal; the level is the absorption state.
+outputs.bufferMean             = bufferSum_all ./ max(1, agentCount_all);
+% First model year is calendar startYear, by construction. Emitted so
+% consumers stop deriving it and can be checked against it.
+outputs.modelYearStart         = modelParameters.startYear;
+outputs.nModelYears            = nYearsTotal;
+if agentTraceOn
+    outputs.aspirationHistory = aspirationHistory;
+end
 
 % --- Buffer agent-trace write-out (diagnostic) ---
 if bufferTraceOn
@@ -1719,6 +2272,11 @@ agentSummary.rValue = [agentList(:).rValue]';
 agentSummary.bList = [agentList(:).bList]';
 agentSummary.TOD = [agentList(:).TOD]';
 agentSummary.trapped = [agentList(:).trapped]';
+% Aspiration/ability classification, 1-5 (see Agent.m). Reported alongside
+% trapped rather than replacing it: trapped remains the binary immobility
+% series every existing metric is built on, while this separates voluntary
+% from involuntary immobility and unconstrained from constrained movers.
+agentSummary.mobilityClass = [agentList(:).mobilityClass]';
 %agentSummary.wealthHistory = [agentList(:).wealthHistory]';
 
 
@@ -1738,12 +2296,14 @@ tempExperience = cell(length(agentList),1);
 for indexI = 1:length(agentList)
     tempCurrentPortfolio{indexI} = agentList(indexI).currentPortfolio;
     tempFirstPortfolio{indexI} = agentList(indexI).firstPortfolio;
-    tempPortfolioHistory{indexI} = agentList(indexI).agentPortfolioHistory;
-    tempAspirationHistory{indexI} = agentList(indexI).agentAspirationHistory;
-    tempConsideredHistory{indexI} = agentList(indexI).consideredHistory;
+    if agentTraceOn
+        tempPortfolioHistory{indexI} = agentList(indexI).agentPortfolioHistory;
+        tempAspirationHistory{indexI} = agentList(indexI).agentAspirationHistory;
+        tempConsideredHistory{indexI} = agentList(indexI).consideredHistory;
+        tempWealthHistory{indexI} = agentList(indexI).wealthHistory;
+    end
     tempTraining{indexI} = agentList(indexI).training;
     tempExperience{indexI} = agentList(indexI).experience;
-    tempWealthHistory{indexI} = agentList(indexI).wealthHistory;
     try
     tempNetwork{indexI} = [agentList(indexI).network(:).id];
     catch
@@ -1754,15 +2314,22 @@ for indexI = 1:length(agentList)
 end
 agentSummary.currentPortfolio = tempCurrentPortfolio;
 agentSummary.firstPortfolio = tempFirstPortfolio;
-agentSummary.portfolioHistory = tempPortfolioHistory;
-agentSummary.aspirationHistory = tempAspirationHistory;
-agentSummary.consideredHistory = tempConsideredHistory;
 agentSummary.network = tempNetwork;
 agentSummary.moveHistory = tempMove;
 agentSummary.accessCodes = tempAccess;
 agentSummary.training = tempTraining;
 agentSummary.experience = tempExperience;
-agentSummary.wealthHistory = tempWealthHistory;
+
+% The four per-timestep columns are what made agentSummary 99.96% of a
+% projection output file. Attached only when tracing is on; the scalar
+% columns above are one value per agent and cost almost nothing, so
+% agentSummary remains available for end-state analysis either way.
+if agentTraceOn
+    agentSummary.portfolioHistory = tempPortfolioHistory;
+    agentSummary.aspirationHistory = tempAspirationHistory;
+    agentSummary.consideredHistory = tempConsideredHistory;
+    agentSummary.wealthHistory = tempWealthHistory;
+end
 
 outputs.agentSummary = agentSummary;
 

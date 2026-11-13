@@ -77,15 +77,36 @@ if isempty(found)
 else
     L = load(found);
     ok(sprintf('will load NARROWED bounds from %s (%d parameters)', found, height(L.mcParams)));
+    % The four food-insecurity drivers are shown together because the
+    % subsistence range was identified CONDITIONAL on the other three. Reading
+    % subsistence alone tells you nothing about whether that conditioning still
+    % holds; reading all four side by side does.
     show = {'modelParameters.numAgents', 'agentParameters.subsistence_costs', ...
+            'modelParameters.droughtScaleFactor', ...
+            'agentParameters.incomeShareFractionMean', ...
+            'modelParameters.distressShortfallFrac', ...
             'mapParameters.movingCostPerMile', 'mapParameters.minDistForCost', ...
             'mapParameters.maxDistForCost'};
+    % THESE ARE THE BOUNDS ON DISK, NOT NECESSARILY THE ONES SAMPLED.
+    % runMIDASExperiment_parallel overrides five of them AFTER loading this
+    % file (the declaredFixed and declaredRange blocks). So a stale-looking
+    % interval below is expected for those five and is not a fault; what would
+    % be a fault is the runner's blocks going missing, which preflight.sh
+    % checks. Marked inline so the two are never read as contradicting.
+    declared = {'agentParameters.subsistence_costs', ...
+                'agentParameters.incomeShareFractionMean', ...
+                'modelParameters.distressShortfallFrac'};
     for k = 1:numel(show)
         i = find(strcmp(L.mcParams.Name, show{k}), 1);
+        tag = '';
+        if ismember(show{k}, declared)
+            tag = '   <- OVERRIDDEN by the runner; this is the on-disk value';
+        end
         if isempty(i)
-            fprintf('     %-42s not in design\n', show{k});
+            fprintf('     %-42s not in design%s\n', show{k}, tag);
         else
-            fprintf('     %-42s [%g, %g]\n', show{k}, L.mcParams.Lower(i), L.mcParams.Upper(i));
+            fprintf('     %-42s [%g, %g]%s\n', show{k}, ...
+                    L.mcParams.Lower(i), L.mcParams.Upper(i), tag);
         end
     end
     % The distance-band parameters were INERT before the 2026-08-09 map-cache
@@ -110,6 +131,108 @@ fprintf('\n4. DISTANCE COSTS\n');
 fprintf('   band [%g, %g] miles, movingCostPerMile default %g\n', ...
         mapP.minDistForCost, mapP.maxDistForCost, mapP.movingCostPerMile);
 fprintf('   (run check_moving_costs for the full cost-surface test)\n');
+
+% --- 5. The four drought channels --------------------------------------
+% Every one of these can be silently switched off -- by an unset environment
+% variable, by a calibration round narrowing it to zero, or by a default that
+% was never revisited. A channel at zero is not a smaller effect, it is a
+% different model, and the methods section claims all four are active. The
+% localDemandCoupling case cost a whole calibration round before it was
+% noticed, so they are all reported together here.
+fprintf('\n5. DROUGHT CHANNELS (methods claims all four are active)\n');
+chan = { ...
+    'crop yield factor',        'droughtScaleFactor',  'scales the yield perturbation'; ...
+    'local demand coupling',    'localDemandCoupling', 'drought -> non-farm income'; ...
+    'food-price response',      'phiFood',             'drought -> subsistence cost'; ...
+    'livestock terms of trade', 'phiLv',               'drought -> buffer sale value'};
+anyOff = false;
+for k = 1:size(chan, 1)
+    f = chan{k, 2};
+    if isfield(mp, f)
+        v = mp.(f);
+        if v == 0
+            warn(sprintf('%-24s %-22s = 0  DISABLED (%s)', chan{k,1}, f, chan{k,3}));
+            anyOff = true;
+        else
+            ok(sprintf('%-24s %-22s = %g  (%s)', chan{k,1}, f, v, chan{k,3}));
+        end
+    else
+        warn(sprintf('%-24s %-22s NOT SET', chan{k,1}, f));
+        anyOff = true;
+    end
+end
+% --- Does the drought forcing actually REACH the projection period? -------
+% The channel check above passes as long as droughtScaleFactor is non-zero.
+% That is necessary but nowhere near sufficient, and the gap is what sank the
+% Set 21 campaign: droughtScaleFactor was 0.05-0.40 and reported healthy, but
+% it multiplies OBSERVED SPEI, and observed_spei_harvest.csv stops at 2022.
+% With droughtVariabilityOn = false the Markov chain that should take over
+% never ran, so 2023-2085 had no drought events at all -- only the smooth GRMA
+% mean-yield decline. Every national series went flat after 2023 and nobody
+% noticed until the ensemble was plotted.
+%
+% A scale factor with nothing to scale is worse than a zero, because it looks
+% fine in every summary.
+OBS_LAST_YEAR = 2022;
+fprintf('\n5b. DROUGHT FORCING REACHES THE RUN HORIZON\n');
+varOn = isfield(mp, 'droughtVariabilityOn') && mp.droughtVariabilityOn;
+endY  = isfield(mp, 'endYear') * mp.endYear;
+if endY > OBS_LAST_YEAR
+    if varOn
+        ok(sprintf('endYear %d > observed record (%d); Markov variability ON', ...
+                   endY, OBS_LAST_YEAR));
+    else
+        warn(sprintf(['endYear %d > observed record (%d) but droughtVariabilityOn ' ...
+                      '= FALSE.\n      Years %d-%d will have NO drought events, only ' ...
+                      'the smooth GRMA mean-yield trend.\n      Set DROUGHT_VARIABILITY=1.'], ...
+                      endY, OBS_LAST_YEAR, OBS_LAST_YEAR + 1, endY));
+        anyOff = true;
+    end
+else
+    ok(sprintf('endYear %d is within the observed SPEI record (to %d)', ...
+               endY, OBS_LAST_YEAR));
+end
+
+% The environment variable overrides the parameter at run time, so report what
+% it will resolve to rather than only what readParameters holds.
+envK = getenv('LOCAL_DEMAND_COUPLING');
+if isempty(envK)
+    fprintf('   LOCAL_DEMAND_COUPLING unset -> falls back to the parameter above\n');
+else
+    fprintf('   LOCAL_DEMAND_COUPLING = "%s" -> OVERRIDES the parameter above\n', envK);
+end
+if anyOff
+    warn('At least one drought channel is off. Fix it, or correct the methods text.');
+end
+
+% --- 6. What the sampler will actually use -----------------------------
+% A parameter whose narrowed bounds have collapsed to a point is FIXED, and
+% the collapse is silent. Worth seeing before submitting, because it is how a
+% mechanism gets disabled without anyone choosing to disable it.
+fprintf('\n6. FIXED PARAMETERS IN THE NARROWED BOUNDS\n');
+if isempty(found)
+    fprintf('   (no updatedMCParams.mat -- fresh wide priors, nothing fixed)\n');
+else
+    L2 = load(found);
+    fixedIdx = find(L2.mcParams.Upper - L2.mcParams.Lower <= 1e-9);
+    if isempty(fixedIdx)
+        ok('no parameter has collapsed to a point');
+    else
+        fprintf('   %d parameters are fixed:\n', numel(fixedIdx));
+        for k = fixedIdx(:)'
+            nm = L2.mcParams.Name{k};
+            val = L2.mcParams.Lower(k);
+            % Switches fixed at 1, and control settings, are expected. A
+            % behavioural coefficient pinned at zero is not.
+            isSwitch = any(contains(lower(nm), {'arm', 'enabled', 'code'}));
+            if val == 0 && ~isSwitch
+                warn(sprintf('%-52s = 0   <-- mechanism off?', nm));
+            else
+                fprintf('     %-52s = %g\n', nm, val);
+            end
+        end
+    end
+end
 
 fprintf('\n=======================================================\n');
 fprintf('Submit only if every line above reads PASS.\n\n');

@@ -15,6 +15,21 @@ classdef Agent < handle
        TOD
        DOB
        trapped
+       mobilityClass        % aspiration/ability category, set in choosePortfolio:
+                            %   0 no decision taken this quarter (reset each
+                            %     quarter in midasMainLoop; only agents that
+                            %     actually evaluate get a class, so statistics
+                            %     must filter on > 0)
+                            %   1 voluntarily immobile   (nothing beats staying)
+                            %   2 involuntarily immobile (wants better, cannot
+                            %                             afford any of it) = trapped
+                            %   3 voluntary migrant      (moved, took the best)
+                            %   4 constrained migrant    (moved, but the best
+                            %                             option was unaffordable)
+                            %   5 distress migrant       (overlay; bypasses cost)
+                            % trapped stays binary-ish (0, or 1/2 for the
+                            % credit-sign diagnostic) so every existing output
+                            % keeps its meaning; this field carries the taxonomy.
        consecutiveFIYears   % counter of consecutive years food-insecure
                             % (wealth_end < wealth_start). Used by variant
                             % A (distressTriggerCode == 1) of the distress
@@ -49,9 +64,38 @@ classdef Agent < handle
                             % endowment (granted the first time it occupies
                             % an agricultural layer -- i.e. takes up farming
                             % and pays the small-farm cost -- not at birth).
+       parentID             % id of the agent that gave birth to this one, or
+                            % 0 for the founding population. Recorded so
+                            % wealth can pass to surviving offspring at death
+                            % (2026-08-27). The mother-child link also exists
+                            % in the social network, but networks are rewired
+                            % over the run and are not a reliable record of
+                            % descent.
+       children             % ids of this agent's offspring, appended at each
+                            % birth. Held on the parent so inheritance is a
+                            % lookup rather than a scan over every agent at
+                            % every death.
+       nonAgBufferGranted   % logical: whether this agent has already received
+                            % the smaller NON-farm starter store. Separate from
+                            % farmBufferGranted (2026-08-27) because a single
+                            % flag was consumed by whichever branch fired
+                            % first: an agent not farming at its first
+                            % year-end took the non-ag store, marked itself
+                            % granted, and was then permanently ineligible for
+                            % the farm endowment when it later took up
+                            % farming. Traced southern farmers consequently
+                            % began at the non-ag floor (0.42 with subsistence
+                            % 1.75) instead of the 3.50 farm endowment, and the
+                            % buffer took ~15 years to reach its operating
+                            % level -- which in turn drove the long decline in
+                            % food insecurity and distress migration across the
+                            % historical period.
        lastShortfall        % unmet consumption shortfall at the most
-                            % recent year-end (food gap remaining AFTER
-                            % buffer drawdown). Set in midasMainLoop's
+                            % recent year-end, as a BOUNDED FRACTION [0,1]
+                            % of the agent's own food requirement (gap
+                            % remaining AFTER buffer drawdown, divided by
+                            % the inflated requirement). Cost units before
+                            % 2026-09-06. Set in midasMainLoop's
                             % buffer block; read by Variant F
                             % (checkDistressTrigger case 6); reset on a
                             % distress move. Stays 0 when bufferEnabled
@@ -174,11 +218,15 @@ classdef Agent < handle
          A.TOD = -9999;  %TOD is 'time of death'
          A.DOB = -9999;  %DOB is 'date of birth'
          A.trapped = 0;
+         A.mobilityClass = 1;   % voluntarily immobile until a choice is made
          A.consecutiveFIYears = 0;
          A.quartersBelowWealthThreshold = 0;
          A.lastDistressMoveT = -9999;
          A.buffer = 0;
          A.farmBufferGranted = false;
+         A.nonAgBufferGranted = false;
+         A.parentID = 0;
+         A.children = [];
          A.agIncomeYTD = 0;
          A.lastShortfall = 0;
          A.livelihoodAttachment = rand();

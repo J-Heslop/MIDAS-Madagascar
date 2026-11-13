@@ -71,7 +71,10 @@ end
 nLocs = length(locNames);
 
 T          = size(output.countAgentsPerLayer, 3);
-yearAxis   = startYear + (0:T-1) / cycleLength;
+% Model time starts at the END of spinup: timestep spinupSteps+1 is
+% calendar startYear (createUtilityLayers.m:750). The previous form
+% counted the spinup quarters as real years, shifting the whole axis.
+yearAxis   = startYear + ((0:T-1) - spinupSteps) / cycleLength;
 postSpinup = spinupSteps+1 : T;
 
 numAgents = height(output.agentSummary);
@@ -92,7 +95,7 @@ for iL = 1:nLayers
     plot(yearAxis(postSpinup), nationalPerLayer(iL, postSpinup), ...
         'Color', cm(iL,:), 'LineWidth', 1.8, 'DisplayName', layerNames{iL});
 end
-xline(startYear + spinupTime, '--k', 'Label','Spinup end', ...
+xline(startYear, '--k', 'Label','Spinup end', ...
       'LabelHorizontalAlignment','right', 'HandleVisibility','off');
 hold off;
 xlabel('Year');

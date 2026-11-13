@@ -278,9 +278,29 @@ recentCycles = pastCycles(:, :, nPastCycles-nShockCycles+1:nPastCycles);
 residuals = recentCycles - repmat(meanCycle, [1 1 nShockCycles]);
 
 % Fill evaluation horizon: weighted mean + random shock from residuals.
+%
+% ONE SHOCK YEAR PER SIMULATED YEAR (2026-09-04). rndCycle was previously
+% redrawn for EVERY QUARTER, so the expected path could take Q1's deviation
+% from one recent year and Q2's from another. Two reasons that is wrong here.
+%
+% As a belief it is incoherent: "next year will resemble a recent bad year"
+% is something a household might think; "Q1 of 2019 followed by Q2 of 2021"
+% is not.
+%
+% And it interacts badly with the annual aggregation now applied in
+% choosePortfolio, which sums the expected path to cycle totals before the
+% value function. Mixing residuals from different years within one simulated
+% year averages them, so the shocks largely cancel and the arm collapses
+% toward deterministic arm 1 -- losing the expectation heterogeneity that is
+% the whole reason this arm exists.
+%
+% Drawing once per cycle keeps the deviation coherent across the year and
+% preserves it through the annual sum.
 for q = 1:nEval
     cycleQuarter = mod(q-1, cycleLen) + 1;
-    rndCycle = ceil(rand() * nShockCycles);
+    if cycleQuarter == 1
+        rndCycle = ceil(rand() * nShockCycles);
+    end
     shock = residuals(:, cycleQuarter, rndCycle);
     pData(:, q) = meanCycle(:, cycleQuarter) + shock;
 end

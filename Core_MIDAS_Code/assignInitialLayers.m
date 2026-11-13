@@ -200,7 +200,10 @@ for indexA = 1:length(agentList)
        end
    end
 
-   currentAgent.agentPortfolioHistory{currentT} = currentAgent.currentPortfolio;
-   currentAgent.agentAspirationHistory{currentT} = currentAgent.currentAspiration;
+   % Per-agent trace, off by default -- see modelParameters.agentTraceOn.
+   if isfield(modelParameters, 'agentTraceOn') && modelParameters.agentTraceOn
+       currentAgent.agentPortfolioHistory{currentT} = currentAgent.currentPortfolio;
+       currentAgent.agentAspirationHistory{currentT} = currentAgent.currentAspiration;
+   end
 end
 

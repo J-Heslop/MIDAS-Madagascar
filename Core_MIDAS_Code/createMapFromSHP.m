@@ -60,6 +60,53 @@ try
     locations = cached.locations;
     map       = cached.map;
     borders   = cached.borders;
+
+    % CACHE VALIDATION (2026-09-03). A cache is only usable if it carries the
+    % region-name field every downstream drought lookup keys on.
+    %
+    % The February cache did not. Without source_NAME_2, createUtilityLayers
+    % falls back to source_ADM2_FR -- a 15-CHARACTER DBF field that truncates
+    % 'Atsimo-Andrefana' to 'Atsimo-Andrefan' and 'Vatovavy Fitovinany' to
+    % 'Vatovavy Fitovi'. Exactly two of the 22 Madagascar region names exceed
+    % 15 characters, so exactly those two failed every lookup against the GRMA
+    % surfaces, the observed SPEI record, the Markov parameters and the
+    % correlation matrix.
+    %
+    % yieldFactor is initialised to ones() and only matched locations are ever
+    % written, so both regions ran with NO drought forcing of any kind --
+    % silently, with well-formed output. One of them, Atsimo-Andrefana, is a
+    % Grand Sud study region.
+    %
+    % Treating this as a cache MISS rather than an error means the rebuild is
+    % automatic: no one has to remember to delete a .mat before a campaign, and
+    % an old cache carried onto a cluster cannot reintroduce the fault.
+    if ~ismember('source_NAME_2', locations.Properties.VariableNames)
+        error('createMapFromSHP:staleCache', ...
+              ['cached locations table has no source_NAME_2 field (has: %s). ' ...
+               'Rebuilding from the shapefile.'], ...
+              strjoin(locations.Properties.VariableNames( ...
+                  startsWith(locations.Properties.VariableNames, 'source_')), ', '));
+    end
+    % TRUNCATION TEST. An earlier version flagged any name exactly 15
+    % characters long, on the grounds that ADM2_FR is a 15-wide field. That
+    % produced FALSE POSITIVES: 'Atsimo-Atsinana', 'Haute matsiatra' and
+    % 'Alaotra-Mangoro' are all legitimately 15 characters, so a perfectly
+    % good cache was rejected and sent for a rebuild that cannot run.
+    %
+    % The precise test is whether source_NAME_2 is merely a COPY of the
+    % truncated field. If both exist and agree on every row, NAME_2 carries no
+    % information ADM2_FR does not, and the long names have been lost. Names
+    % that are 15 characters because that is their length are unaffected.
+    if ismember('source_ADM2_FR', locations.Properties.VariableNames)
+        n2 = strtrim(string(locations.source_NAME_2));
+        fr = strtrim(string(locations.source_ADM2_FR));
+        if numel(n2) == numel(fr) && all(n2 == fr)
+            error('createMapFromSHP:truncatedCache', ...
+                  ['cached source_NAME_2 is identical to source_ADM2_FR on every ' ...
+                   'row, so long region names have been truncated to that ' ...
+                   'field''s 15-character width. Rebuilding.']);
+        end
+    end
     for fCache = {'r1', 'sizeX', 'sizeY'}
         if isfield(cached.mapParameters, fCache{1})
             mapParameters.(fCache{1}) = cached.mapParameters.(fCache{1});

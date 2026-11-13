@@ -46,14 +46,40 @@ function [locationLikelihood, genderLikelihood, ageLikelihood, survivalRate, fer
 %uniform random
 if(~isempty(modelParameters.popFile))
     popTable = readtable(modelParameters.popFile);
-    popTable.population = sum(popTable{:,end},2);
+
+    % TOTAL POPULATION COLUMN (fixed 2026-08-26). This was
+    %     popTable.population = sum(popTable{:,end},2);
+    % which reads whatever happens to be the LAST column. That worked only
+    % while the file held nothing but totals. Adding age-sex columns made the
+    % last column female100_104, so every region's population -- and hence the
+    % spatial distribution of all agents -- would have become the count of
+    % centenarian women. Name the column instead of relying on its position.
+    if any(strcmp(popTable.Properties.VariableNames, 'x1985_pop'))
+        popTable.population = popTable.x1985_pop;
+    elseif any(strcmp(popTable.Properties.VariableNames, 'pop1985'))
+        popTable.population = popTable.pop1985;
+    else
+        popCol = find(contains(popTable.Properties.VariableNames, 'pop', ...
+                               'IgnoreCase', true) & ...
+                      ~startsWith(popTable.Properties.VariableNames, 'male') & ...
+                      ~startsWith(popTable.Properties.VariableNames, 'female'), 1);
+        if isempty(popCol)
+            error('buildDemography:noPopColumn', ...
+                  ['No total-population column found in %s. Expected a column ' ...
+                   'whose name contains "pop".'], modelParameters.popFile);
+        end
+        popTable.population = popTable{:, popCol};
+    end
+
     popTable = join(popTable,locations,'LeftKeys',{'ADM2_PCODE'},'RightKeys',{'source_ADM2_PCODE'});
-    
-    % Check whether the population file contains age-sex breakdown columns
-    % (expected format: male_X_Y and female_X_Y, e.g. male_0_4, female_15_19).
-    % If absent (e.g. only a total-population column is provided), we still
-    % use the file for spatial distribution but fall back to a uniform age
-    % distribution so the model does not crash.
+
+    % Check whether the population file contains age-sex breakdown columns.
+    % NAMING: 'maleA_B' / 'femaleA_B' with NO underscore after the sex, e.g.
+    % male0_4, female15_19. The parser below strips the sex prefix and takes
+    % the text after the FIRST underscore, so male0_4 -> '4'. With male_0_4
+    % the strip leaves '_0_4', strfind returns two underscore positions,
+    % extractAfter throws, the try swallows it and str2double yields NaN.
+    % (readParameters.m previously documented male_X_Y, which does not work.)
     hasMaleAgeCols   = any(startsWith(popTable.Properties.VariableNames, 'male'));
     hasFemaleAgeCols = any(startsWith(popTable.Properties.VariableNames, 'female'));
 
@@ -77,17 +103,39 @@ if(~isempty(modelParameters.popFile))
         agePointsPopulationFemale = str2double(agePointsPopulationFemale);
         [~, ageIndexFemale] = sort(agePointsPopulationFemale,'ascend');
 
-        ageLikelihoodMale = popTable{:,startsWith(popTable.Properties.VariableNames,'male')};
-        ageLikelihoodMale(popTable.matrixID,:) = ageLikelihoodMale;
-        ageLikelihoodMale = ageLikelihoodMale(:,ageIndexMale); %just in case the tables aren't ordered properly
-        popTable.male = sum(ageLikelihoodMale,2);
+        % ROW ORDERING (fixed 2026-08-26). Rows arrive in popTable order and
+        % must be permuted into map order, where matrixID gives the map row for
+        % each table row -- so the assignment is
+        %     dest(matrixID, :) = source
+        % done ONCE. The male branch did that correctly; the female branch
+        % additionally indexed the source by matrixID as it read
+        %     popTable{popTable.matrixID, ...}
+        % applying the permutation twice, so male and female ended up on
+        % different regional orderings. Both now use the same single step.
+        rawMale   = popTable{:, startsWith(popTable.Properties.VariableNames, 'male')};
+        rawFemale = popTable{:, startsWith(popTable.Properties.VariableNames, 'female')};
+
+        ageLikelihoodMale = zeros(size(rawMale));
+        ageLikelihoodMale(popTable.matrixID, :) = rawMale;
+        ageLikelihoodMale = ageLikelihoodMale(:, ageIndexMale);
+
+        ageLikelihoodFemale = zeros(size(rawFemale));
+        ageLikelihoodFemale(popTable.matrixID, :) = rawFemale;
+        ageLikelihoodFemale = ageLikelihoodFemale(:, ageIndexFemale);
+
+        % SEX TOTALS (fixed 2026-08-26). The second of these read
+        %     popTable.male = sum(ageLikelihoodFemale, 2);
+        % overwriting the male total with the female sum, so genderLikelihood
+        % below -- the probability an agent is MALE -- carried the FEMALE
+        % share. Sex would have been inverted for every agent, and since only
+        % females bear children that propagates straight into fertility.
+        % These are in MAP order, matching genderLikelihood's use in buildWorld.
+        maleTotal   = sum(ageLikelihoodMale,   2);
+        femaleTotal = sum(ageLikelihoodFemale, 2);
+
         ageLikelihoodMale = cumsum(ageLikelihoodMale,2);
         ageLikelihoodMale = ageLikelihoodMale ./ (ageLikelihoodMale(:,end) * ones(1,size(ageLikelihoodMale,2)));
 
-        ageLikelihoodFemale = popTable{popTable.matrixID,startsWith(popTable.Properties.VariableNames,'female')};
-        ageLikelihoodFemale(popTable.matrixID,:) = ageLikelihoodFemale;
-        ageLikelihoodFemale = ageLikelihoodFemale(:,ageIndexFemale); %just in case the tables aren't ordered properly
-        popTable.male = sum(ageLikelihoodFemale,2);
         ageLikelihoodFemale = cumsum(ageLikelihoodFemale,2);
         ageLikelihoodFemale = ageLikelihoodFemale ./ (ageLikelihoodFemale(:,end) * ones(1,size(ageLikelihoodFemale,2)));
 
@@ -95,19 +143,70 @@ if(~isempty(modelParameters.popFile))
         ageLikelihood(:,:,2) = ageLikelihoodFemale;
         agePointsPopulation = agePointsPopulationMale;
 
-        popTable.female = sum(popTable{:,startsWith(popTable.Properties.VariableNames,'female')},2);
-        popTable = popTable(:,{'population','male','female','matrixID'});
+        % STRICTLY INCREASING CHECK. buildWorld.m draws an age with
+        %     interp1([0 ageLikelihood(loc,:,gender)], [0 agePointsPopulation], rand())
+        % which requires unique sample points. An age band with zero population
+        % leaves the cumulative distribution flat across it, two points
+        % coincide, and interp1 throws "Sample points must be unique" from
+        % inside buildWorld with no indication that the population FILE is the
+        % cause. Madagascar 1985 has nobody in the 100+ band, which is exactly
+        % this case. Fail here instead, naming the band.
+        for iSex = 1:2
+            flat = find(diff([zeros(size(ageLikelihood,1),1) ageLikelihood(:,:,iSex)], 1, 2) <= 0);
+            if ~isempty(flat)
+                [~, badCol] = ind2sub([size(ageLikelihood,1) size(ageLikelihood,2)], flat(1));
+                sexName = {'male', 'female'};
+                error('buildDemography:emptyAgeBand', ...
+                      ['Age band ending %g has zero %s population in at least one ' ...
+                       'region, so the cumulative age distribution is flat there ' ...
+                       'and interp1 in buildWorld cannot invert it.\n' ...
+                       'Remove empty bands from %s.'], ...
+                      agePointsPopulation(min(badCol, numel(agePointsPopulation))), ...
+                      sexName{iSex}, modelParameters.popFile);
+            end
+        end
 
-        genderLikelihood = popTable.male ./ popTable.population;
-        genderLikelihood(popTable.matrixID) = genderLikelihood;
+        % genderLikelihood is already in map order because maleTotal and
+        % femaleTotal are. The previous line
+        %     genderLikelihood(popTable.matrixID) = genderLikelihood;
+        % was a self-assignment through an index -- a permutation applied to a
+        % variable being read and written at once, correct only when matrixID
+        % is the identity.
+        genderLikelihood = maleTotal ./ max(maleTotal + femaleTotal, eps);
+
+        popTable = popTable(:,{'population','matrixID'});
     else
-        % No age-sex columns — use population totals for spatial distribution
-        % only, and fall back to uniform age distribution and 50/50 sex ratio.
-        warning('buildDemography: popFile has no male_*/female_* age columns. Using total population for spatial distribution only; age distribution will be uniform.');
-        agePointsPopulation = [0 50 100];
-        ageLikelihood = ones(height(locations),1) * [0 0.5 1];
-        ageLikelihood(:,:,2) = ageLikelihood;
-        genderLikelihood = 0.5 * ones(height(locations),1);
+        % NO AGE COLUMNS. This used to warn and continue with ages drawn
+        % UNIFORMLY on [0, 100] -- an initial population in which 15% of
+        % agents are over 85 and the 15+ share is 0.85, against 0.53 for
+        % Madagascar in 1985. The model then spent roughly 25 years converging
+        % on a plausible pyramid as mortality cleared the impossible elderly
+        % excess and births filled the young end. Every metric before about
+        % 2010 was measuring that recovery, and the calibration pooled those
+        % years into foodInsecureRate_ag.
+        %
+        % It ran that way from the start because the warning scrolled past in
+        % logs nobody re-read. A silent fallback to a demographically
+        % impossible population is not a graceful degradation, so it now stops.
+        % Set allowUniformAgeFallback = true only for a deliberate test.
+        if isfield(modelParameters, 'allowUniformAgeFallback') && ...
+           modelParameters.allowUniformAgeFallback
+            warning('buildDemography:uniformAges', ...
+                    ['popFile has no maleA_B/femaleA_B columns. Ages will be ' ...
+                     'UNIFORM on [0 100] -- 15+ share 0.85 vs 0.53 observed. ' ...
+                     'Results before ~2010 are not interpretable.']);
+            agePointsPopulation = [0 50 100];
+            ageLikelihood = ones(height(locations),1) * [0 0.5 1];
+            ageLikelihood(:,:,2) = ageLikelihood;
+            genderLikelihood = 0.5 * ones(height(locations),1);
+        else
+            error('buildDemography:noAgeColumns', ...
+                  ['%s has no maleA_B / femaleA_B age-sex columns.\n' ...
+                   'Point modelParameters.popFile at ' ...
+                   'Data/1985_MDG_GHSPop_by_age_sex.csv, or set\n' ...
+                   'modelParameters.allowUniformAgeFallback = true to accept a ' ...
+                   'uniform [0 100] age distribution.'], modelParameters.popFile);
+        end
     end
 
     locationLikelihood = zeros(height(locations),1);

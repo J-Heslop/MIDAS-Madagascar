@@ -45,14 +45,26 @@ function [fire, diag] = checkDistressTrigger(agent, modelParameters, indexT, ora
 %          move) prevents immediate re-firing while the trailing window
 %          still spans the shock.
 %
-%     6 -- VARIANT F: income shock AND MATERIAL consumption shortfall
-%          fire if the Variant E income-shock condition holds AND the
-%          agent's most recent year-end consumption shortfall (unmet
-%          food gap AFTER drawing down the livestock/grain buffer;
-%          agent.lastShortfall, set in midasMainLoop) exceeds the
-%          materiality threshold distressShortfallAbs (a fraction of
-%          annual subsistence, default 0.1 ~ one month of food; 0 =
-%          legacy strict-positive behaviour).
+%     6 -- VARIANT F: SOLVENCY (redesigned 2026-07-28)
+%          fire if the cooldown has cleared AND the agent's most recent
+%          year-end consumption shortfall (unmet food gap AFTER drawing
+%          down the livestock/grain buffer; agent.lastShortfall, set in
+%          midasMainLoop) exceeds distressShortfallFracThresh.
+%          THERE IS NO INCOME-SHOCK CONDITION IN THIS ARM. This header
+%          described one until 2026-09-06, having been left behind by the
+%          2026-07-28 redesign that moved the conjunction to case 106.
+%          The stale text cost real analysis time: firing was diagnosed
+%          as an income-shock conjunction when a trace showed incomeShock
+%          false in all 22,539 rows while 1,117 fires matched
+%          "cooldownOK AND shortfall > threshold" exactly.
+%          UNITS (2026-09-06): lastShortfall is the FRACTION of its own
+%          food requirement the agent failed to obtain, bounded [0,1],
+%          and the threshold is that same fraction. Both sides were
+%          previously costs on mismatched bases -- the left measured
+%          against the drought-inflated requirement, the right against
+%          nominal subsistence -- which let the left side exceed 1.0 in
+%          14% of food-insecure agent-years. A threshold of 0.4 now
+%          reads "moves once it obtained less than 60% of its need".
 %          This is the empirically documented rule: households ride out
 %          a first failed harvest on the buffer and move only once it
 %          can no longer cover consumption. shortfall > 0 implies the
@@ -102,6 +114,46 @@ if ~isfield(modelParameters, 'distressMigrationEnabled') || ...
 end
 
 code = modelParameters.distressTriggerCode;
+
+% RESOLVED-CONFIGURATION REPORT (diagnostic, once per MATLAB session).
+%
+% Which arm actually runs is decided here, from a field that passes through
+% the bounds file, the inputs table and readParameters' eval-based override
+% loop. readParameters.m:325 DEFAULTS this to 1 (Variant A), which fires on
+% consecutiveFIYears and never consults lastShortfall -- so an override that
+% failed to land would produce distress moves unrelated to the shortfall
+% threshold, which is indistinguishable in the output from arm 6 misbehaving.
+% Printing the resolved values removes the guesswork.
+persistent reportedConfig
+if isempty(reportedConfig)
+    reportedConfig = true;
+    armName = 'UNRECOGNISED';
+    switch code
+        case 1;   armName = 'A: consecutive FI years';
+        case 2;   armName = 'B: wealth threshold + duration';
+        case 3;   armName = 'C: cumulative wealth shortfall';
+        case 4;   armName = 'D: stochastic depth';
+        case 5;   armName = 'E: income shock';
+        case 6;   armName = 'F: SOLVENCY (lastShortfall > threshold)';
+        case 7;   armName = 'ORACLE (diagnostic only)';
+        case 106; armName = 'LEGACY F (income shock AND shortfall)';
+    end
+    fprintf('checkDistressTrigger: distressTriggerCode = %g -- Variant %s\n', code, armName);
+    if isfield(modelParameters, 'distressShortfallFracThresh')
+        fprintf('                      distressShortfallFracThresh = %.4g\n', ...
+                modelParameters.distressShortfallFracThresh);
+    else
+        fprintf(2, '                      distressShortfallFracThresh NOT SET\n');
+    end
+    if isfield(modelParameters, 'distressCooldownQuarters')
+        fprintf('                      distressCooldownQuarters = %g\n', ...
+                modelParameters.distressCooldownQuarters);
+    end
+    if code ~= 6
+        fprintf(2, ['                      NOTE: arm 6 is the published variant. ' ...
+                    'Arm %g ignores lastShortfall.\n'], code);
+    end
+end
 
 switch code
     case 1   % VARIANT A: consecutive FI years
@@ -154,10 +206,30 @@ switch code
         %
         % REQUIRES bufferEnabled = true (lastShortfall is only ever set in
         % the buffer block; without it the trigger is inert by design).
-        sfThresh = 0;
-        if isfield(modelParameters, 'distressShortfallAbs')
-            sfThresh = modelParameters.distressShortfallAbs;
+        %
+        % BOTH SIDES ARE FRACTIONS OF NEED (2026-09-06). agent.lastShortfall
+        % is the share of its own food requirement the agent failed to obtain,
+        % bounded [0,1]; distressShortfallFracThresh is the share it must miss
+        % before the trigger can fire. Previously the left side was a cost
+        % measured against the drought-inflated requirement and the right side
+        % was a cost built from nominal subsistence -- different bases, and a
+        % left side that ran past 1.0 in 14% of food-insecure agent-years.
+        %
+        % HARD ERROR, not a fallback to 0. The old code defaulted sfThresh to
+        % 0 when the field was absent, which fires on ANY shortfall. With the
+        % units now changed, that same silent default would turn a stale copy
+        % of midasMainLoop.m into a trigger with no threshold at all and no
+        % warning -- the exact failure mode that cost the earlier campaigns.
+        if ~isfield(modelParameters, 'distressShortfallFracThresh')
+            error('checkDistressTrigger:missingFracThresh', ...
+                  ['modelParameters.distressShortfallFracThresh is not set. ' ...
+                   'It is published by midasMainLoop.m alongside the bounded ' ...
+                   'fractional lastShortfall (2026-09-06). A missing field ' ...
+                   'means midasMainLoop.m is a stale copy that still writes ' ...
+                   'lastShortfall in cost units -- recopy it rather than ' ...
+                   'running, because the two are not comparable.']);
         end
+        sfThresh = modelParameters.distressShortfallFracThresh;
         cooldownOK = (indexT - agent.lastDistressMoveT) >= ...
                      modelParameters.distressCooldownQuarters;
 
@@ -169,6 +241,7 @@ switch code
         diag.incomeShock   = false;   % retained for trace-format stability
 
         fire = cooldownOK && (agent.lastShortfall > sfThresh);
+
 
     case 106  % LEGACY Variant F (income shock AND shortfall) -- kept only so
               % pre-2026-07-28 runs remain reproducible. Not for new work.
@@ -198,9 +271,13 @@ switch code
         % gap (~> 1 month of food) makes the buffer's absorption capacity
         % decide whether a bad year crosses the line. Missing field or
         % frac = 0 -> threshold 0 = legacy behaviour.
+        % Same units change as case 6 (2026-09-06): lastShortfall is now a
+        % bounded fraction of need, so this legacy arm reads the fractional
+        % threshold too. Kept comparable rather than left on the removed
+        % distressShortfallAbs, which would silently make sfThresh 0 here.
         sfThresh = 0;
-        if isfield(modelParameters, 'distressShortfallAbs')
-            sfThresh = modelParameters.distressShortfallAbs;
+        if isfield(modelParameters, 'distressShortfallFracThresh')
+            sfThresh = modelParameters.distressShortfallFracThresh;
         end
         fire = shock && (agent.lastShortfall > sfThresh);
 

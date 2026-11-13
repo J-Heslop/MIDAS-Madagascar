@@ -143,10 +143,32 @@ inOutData   = inByRegion ./ outByRegion;
 %
 %  Values in model (shapefile) region order:
 % -----------------------------------------------------------------------
-urbanFracData = [0.3784, 0.0663, 0.1685, 0.1505, 0.3396, 0.1856, ...
-                 0.1287, 0.0711, 0.1707, 0.0948, 0.0948, 0.1294, ...
-                 0.3584, 0.1088, 0.1207, 0.1402, 0.1582, 0.2755, ...
-                 0.0959, 0.1614, 0.1418, 0.1621]';  % column vector
+% UPDATED 2026-09-07. These are no longer urban population shares. They are
+% the NON-AGRICULTURAL population share per region, from RGPH-3 2018 Thematic
+% Report 16 (INSTAT, 2021) Tableau 2.2, computed as 100 - Population(%) in
+% agricultural households. The variable name is retained so that the four
+% references below do not need touching.
+%
+% WHY THE CHANGE. The capacity file that drives non-farm participation now
+% uses the same census quantity, so the target and the constraint must be the
+% same measure or the calibration scores the model against a definition it was
+% not built to satisfy. The old values were urban shares, which the census
+% shows are a poor proxy: 46.3% of urban households are agricultural.
+%
+% CAUTION -- TWO NATIONAL TARGETS THAT DISAGREE. agFrac_nat_data below is 0.76
+% from ILO/FAOSTAT, an EMPLOYMENT share. These values imply a national
+% agricultural share of 0.865, because population-in-agricultural-households
+% counts household members who work off-farm. Both are defensible and they
+% measure different things, so they cannot both be matched. The intended
+% division of labour is that this file supplies the regional PATTERN and
+% modelParameters.nonAgCapacityScale sets the national LEVEL against the ILO
+% figure; reaching 0.24 non-agricultural from a census mean of 0.135 implies a
+% scale near 1.8, against the present 1.0. That value has NOT been changed
+% here -- it moves model behaviour and belongs in a calibration decision.
+urbanFracData = [0.4070, 0.0490, 0.0370, 0.0470, 0.2900, 0.1050, ...
+                 0.0370, 0.0370, 0.0860, 0.0850, 0.0430, 0.0680, ...
+                 0.2400, 0.0320, 0.0550, 0.0820, 0.0800, 0.1790, ...
+                 0.0270, 0.0810, 0.1190, 0.0640]';  % column vector
 
 % Urban layer indices (matching utility_layers_v1.csv row order)
 urbanLayerIdx = [1, 2, 3];   % unskilled1, unskilled2, skilled
@@ -176,6 +198,23 @@ agLayerIdx    = [5, 6, 7, 8, 9, 10]; % rice_north/south, maize, cassava, vanilla
 foodInsecureTarget_agFrac = 3.8 / 12;   % ~0.317 fraction of ag timesteps below subsistence
 foodInsecureTarget_lower  = 0.05;        % year-round insecure (5.5%) -- lower plausibility bound
 foodInsecureTarget_upper  = 0.75;        % ever insecure in a year -- upper plausibility bound
+
+% BURN-IN CUT (2026-08-26). foodInsecureRate_ag was computed as a ratio of
+% sums over EVERY post-spinup year. The Set 21 ensemble shows the rate
+% starting near 0.90 in the late 1980s and falling to about 0.50 by 2025 --
+% a multi-decade transient, tracking the livestock/grain buffer filling from
+% near zero, since foodInsecureCount_ag counts agent-years where income PLUS
+% BUFFER fell below subsistence.
+%
+% Pooling across that transient means the scored metric is an average over a
+% burn-in period rather than a comparable steady state, and subsistence_costs
+% -- which PRCC put at 0.94-0.96 against this metric -- has been absorbing it.
+% modelParameters.spinupTime is 10 quarters, nowhere near enough to burn in a
+% decades-long stock variable.
+%
+% Scoring from 2000 leaves ~25 years to the 2025 horizon.
+FI_BURNIN_YEAR   = 2000;
+CALIB_START_YEAR = 1985;   % modelParameters.startYear
 
 %% -----------------------------------------------------------------------
 %  EVALUATE MODEL RUNS
@@ -477,6 +516,28 @@ foodInsecureTarget_upper  = 0.75;        % ever insecure in a year -- upper plau
                isfield(currentRun.output, 'agentCount_ag')
                 fiCount = currentRun.output.foodInsecureCount_ag;   % nLocs x T
                 agCount = currentRun.output.agentCount_ag;          % nLocs x T
+
+                % Drop the burn-in years (see FI_BURNIN_YEAR above). Column
+                % indexing follows the same convention as the migration census
+                % window below -- year Y is column Y - (startYear - 1).
+                %
+                % NOTE: that convention ignores the spinup offset, so it may sit
+                % one to two years later than the calendar year the column
+                % actually closes in (spinupTime is 10 quarters = 2.5 years, and
+                % the annual counters are written at every 4th timestep). It is
+                % used here for CONSISTENCY with the census window rather than
+                % because it is verified correct -- see the note in the header.
+                % At a 2000 cut a one-year error is immaterial; for the 2018
+                % census window it is not, and should be reconciled.
+                fiFirstCol = max(1, FI_BURNIN_YEAR - (CALIB_START_YEAR - 1));
+                if fiFirstCol < size(fiCount, 2)
+                    fiCount = fiCount(:, fiFirstCol:end);
+                    agCount = agCount(:, fiFirstCol:end);
+                else
+                    fprintf(['    NOTE: run too short to drop burn-in before %d; ' ...
+                             'scoring the full series.\n'], FI_BURNIN_YEAR);
+                end
+
                 totalAgSteps = sum(agCount(:));
                 if totalAgSteps > 0
                     foodInsecureRate_ag = sum(fiCount(:)) / totalAgSteps;
