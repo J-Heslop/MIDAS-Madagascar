@@ -1,0 +1,4 @@
+# Model outputs: regenerable artefacts, not source.
+# Removed from tracking 2026-11-13 -- a single trace file was 23 MB and the
+# folder as a whole was ~39 MB of .mat/.csv/.png that any run reproduces.
+Outputs/
